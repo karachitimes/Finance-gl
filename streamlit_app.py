@@ -207,35 +207,36 @@ with st.container():
     account = st.selectbox("Account", ["ALL"] + get_distinct("account"))
     func_code = st.selectbox("Function Code", ["ALL"] + get_distinct("func_code"))
 
-def build_ui_where(override_func: str | None = "USE_UI"):
+def build_ui_where(func_override=None):
     """
-    override_func:
-      - "USE_UI"  => use UI func_code filter
-      - None      => ignore func_code filter
-      - "ALL"     => ignore func_code filter
-      - "Revenue" (or any string) => force func_code filter
+    func_override:
+      None   -> ignore function filter completely
+      "ALL"  -> ignore function filter
+      "Revenue" (or any value) -> force that function
+      "USE_UI" -> use dropdown as-is (default)
     """
     where = []
     params = {"df": df, "dt": dt}
     where.append("\"date\" between :df and :dt")
 
     if bank != "ALL":
-        where.append("bank = :bank")
-        params["bank"] = bank
+        where.append("bank = :bank"); params["bank"] = bank
     if head != "ALL":
-        where.append("head_name = :head")
-        params["head"] = head
+        where.append("head_name = :head"); params["head"] = head
     if account != "ALL":
-        where.append("account = :account")
-        params["account"] = account
+        where.append("account = :account"); params["account"] = account
 
-    # func_code logic
-    effective = func_code if override_func == "USE_UI" else override_func
-    if effective and effective != "ALL":
+    effective_func = func_code  # UI value
+    if func_override is None or func_override == "ALL":
+        effective_func = "ALL"
+    elif func_override and func_override != "USE_UI":
+        effective_func = func_override
+
+    if effective_func != "ALL":
         where.append("func_code = :func_code")
-        params["func_code"] = effective
+        params["func_code"] = effective_func
 
-    return where, params, (effective if effective else "ALL")
+    return where, params, effective_func
 
 # -------------------------------------------------
 # TABS
@@ -455,48 +456,23 @@ with tab_qa:
 
         # Expense sub-modes
         elif intent == "expense":
-            highest_account = ("highest" in ql or "top" in ql) and "account" in ql
-            by_account = ("by account" in ql) or ("account wise" in ql) or ("account-wise" in ql)
-            per_month = ("per month" in ql) or ("monthly" in ql) or ("trend" in ql) or ("month" in ql)
-
-            if highest_account:
+            if "by head" in q.lower() or "head wise" in q.lower() or "head-wise" in q.lower():
                 sql = f"""
-                select account, sum(coalesce(expense_amount,0)) as expense
+                select head_name, coalesce(sum(coalesce(expense_amount,0)),0) as expense
                 from public.v_finance_logic
                 where {where_sql}
-                  and entry_type='expense'
-                group by 1
-                order by 2 desc
-                limit 10
-                """
-                label = "Top Expense Accounts"
-            elif by_account:
-                sql = f"""
-                select account, sum(coalesce(expense_amount,0)) as expense
-                from public.v_finance_logic
-                where {where_sql}
-                  and entry_type='expense'
+                and entry_type='expense'
                 group by 1
                 order by 2 desc
                 limit 50
                 """
-                label = "Expense by Account"
-            elif per_month:
-                sql = f"""
-                select date_trunc('month',"date") as month, sum(coalesce(expense_amount,0)) as expense
-                from public.v_finance_logic
-                where {where_sql}
-                  and entry_type='expense'
-                group by 1
-                order by 1
-                """
-                label = "Monthly Expense"
+                label = "Expense by Head"
             else:
                 sql = f"""
                 select coalesce(sum(coalesce(expense_amount,0)),0)
                 from public.v_finance_logic
                 where {where_sql}
-                  and entry_type='expense'
+                and entry_type='expense'
                 """
                 label = "Total Expense"
 
@@ -620,5 +596,5 @@ with tab_qa:
             if m_start and m_end_excl:
                 st.write(f"Month range: `{m_start}` to `{m_end_excl}` (end exclusive)")
             st.write("Filters applied:")
-            st.write(f"- Bank: `{bank}`  |  Head: `{head}`  |  Account: `{account}`  |  Function: `{effective_func_display}`")
+            st.write(f"- Bank: `{bank}`  |  Head: `{head}`  |  Account: `{account}`  |  Function: `{func_code}`")
             st.write(f"- From: `{df}`  |  To: `{dt}`")
