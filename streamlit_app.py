@@ -19,8 +19,7 @@ st.set_page_config(page_title="Finance Analytics System", layout="wide")
 def get_engine():
     """
     Create a SQLAlchemy Engine with sensible defaults for Streamlit Cloud.
-    DATABASE_URL should be set in Streamlit Secrets, e.g.
-    postgresql+psycopg2://user:pass@...:6543/postgres?sslmode=require
+    DATABASE_URL should be set in Streamlit Secrets.
     """
     url = st.secrets["DATABASE_URL"]
     return create_engine(
@@ -59,8 +58,7 @@ except OperationalError as e:
 # -------------------------------------------------
 @st.cache_data(ttl=3600)
 def get_distinct(col: str):
-    # col is controlled by code (not user), safe to interpolate.
-    q = text(f"SELECT DISTINCT {col} FROM public.v_finance_logic WHERE {col} IS NOT NULL ORDER BY {col}")
+    q = text(f'SELECT DISTINCT {col} FROM public.v_finance_logic WHERE {col} IS NOT NULL ORDER BY {col}')
     with engine.connect() as conn:
         return [r[0] for r in conn.execute(q).fetchall()]
 
@@ -69,6 +67,7 @@ def get_known_payees():
     return get_distinct("pay_to")
 
 KNOWN_PAYEES = get_known_payees()
+KNOWN_FUNC_CODES = get_distinct("func_code")  # for explicit parsing if user writes "function X"
 
 def best_payee_match(name: str | None):
     if not name:
@@ -82,7 +81,7 @@ def best_payee_match(name: str | None):
 # -------------------------------------------------
 # NLP-ish ROUTING (DETERMINISTIC)
 # -------------------------------------------------
-MONTHS = {m.lower(): i for i, m in enumerate(calendar.month_name) if m}  # jan..dec => 1..12
+MONTHS = {m.lower(): i for i, m in enumerate(calendar.month_name) if m}
 
 def detect_intent(q: str) -> str:
     ql = q.lower()
@@ -102,16 +101,9 @@ def detect_intent(q: str) -> str:
         return "net"
     if any(w in ql for w in ["deposit", "received", "credited"]):
         return "deposit"
-    if any(w in ql for w in ["monthly", "month wise", "month-wise", "per month"]):
-        return "monthly"
     return "search"
 
 def parse_month_range(q: str, default_year: int | None = None):
-    """
-    Parses phrases like "July to January", "jul - jan".
-    Uses default_year (current year) when year is not specified.
-    Returns (start_date, end_date_exclusive) or (None, None).
-    """
     ql = q.lower()
     default_year = default_year or date.today().year
 
@@ -124,12 +116,10 @@ def parse_month_range(q: str, default_year: int | None = None):
         y1 = default_year
         y2 = default_year
 
-        # if range wraps year boundary (e.g., jul -> jan), advance end year
         if m2 < m1:
             y2 = default_year + 1
 
         start = date(y1, m1, 1)
-        # end exclusive = first day of month after m2
         if m2 == 12:
             end_excl = date(y2 + 1, 1, 1)
         else:
@@ -139,22 +129,18 @@ def parse_month_range(q: str, default_year: int | None = None):
     return None, None
 
 def infer_date_sql(q: str):
-    """
-    Returns (sql_fragment, params_dict) or (None, {}).
-    Uses server CURRENT_DATE for relative phrases.
-    """
     ql = q.lower()
 
     if "last month" in ql:
         return (
-            "date >= date_trunc('month', current_date) - interval '1 month' "
-            "and date < date_trunc('month', current_date)",
+            "\"date\" >= date_trunc('month', current_date) - interval '1 month' "
+            "and \"date\" < date_trunc('month', current_date)",
             {}
         )
     if "this month" in ql:
         return (
-            "date >= date_trunc('month', current_date) "
-            "and date < date_trunc('month', current_date) + interval '1 month'",
+            "\"date\" >= date_trunc('month', current_date) "
+            "and \"date\" < date_trunc('month', current_date) + interval '1 month'",
             {}
         )
     return None, {}
@@ -166,8 +152,48 @@ def extract_payee(q: str):
         return best_payee_match(m.group(1))
     return None
 
+def parse_explicit_func_code(q: str) -> str | None:
+    """
+    If user explicitly writes something like:
+      'function revenue' or 'func_code revenue'
+    then return the best matching func_code.
+    Otherwise return None.
+    """
+    ql = q.lower()
+    m = re.search(r"\b(?:function|func_code|func)\s*[:=]?\s*([a-z0-9_\-\s]+)", ql)
+    if not m:
+        return None
+    raw = m.group(1).strip()
+    if not raw:
+        return None
+
+    # Try close match against known func_codes
+    matches = get_close_matches(raw.title(), KNOWN_FUNC_CODES, n=1, cutoff=0.6)
+    return matches[0] if matches else raw.title()
+
+def apply_intent_func_override(intent: str, question: str, ui_func_code: str) -> str | None:
+    """
+    Returns:
+      - 'Revenue' forced for revenue intent (unless user explicitly sets different function)
+      - None to IGNORE func_code filter for expense/recoup/cashflow/trial_balance/search
+      - Or a specific func_code if user explicitly requested it in the question
+    """
+    explicit = parse_explicit_func_code(question)
+
+    # If user explicitly asked for a function, respect it.
+    if explicit:
+        return explicit
+
+    if intent == "revenue":
+        return "Revenue"  # force
+    if intent in ("expense", "recoup", "cashflow", "trial_balance", "net", "deposit", "search"):
+        return None        # ignore func filter for these intents
+
+    # fallback: respect UI
+    return None if ui_func_code == "ALL" else ui_func_code
+
 # -------------------------------------------------
-# FILTERS
+# FILTERS (UI)
 # -------------------------------------------------
 with st.container():
     c1, c2 = st.columns(2)
@@ -181,10 +207,17 @@ with st.container():
     account = st.selectbox("Account", ["ALL"] + get_distinct("account"))
     func_code = st.selectbox("Function Code", ["ALL"] + get_distinct("func_code"))
 
-def build_ui_where():
+def build_ui_where(override_func: str | None = "USE_UI"):
+    """
+    override_func:
+      - "USE_UI"  => use UI func_code filter
+      - None      => ignore func_code filter
+      - "ALL"     => ignore func_code filter
+      - "Revenue" (or any string) => force func_code filter
+    """
     where = []
     params = {"df": df, "dt": dt}
-    where.append("date between :df and :dt")
+    where.append("\"date\" between :df and :dt")
 
     if bank != "ALL":
         where.append("bank = :bank")
@@ -195,11 +228,14 @@ def build_ui_where():
     if account != "ALL":
         where.append("account = :account")
         params["account"] = account
-    if func_code != "ALL":
-        where.append("func_code = :func_code")
-        params["func_code"] = func_code
 
-    return where, params
+    # func_code logic
+    effective = func_code if override_func == "USE_UI" else override_func
+    if effective and effective != "ALL":
+        where.append("func_code = :func_code")
+        params["func_code"] = effective
+
+    return where, params, (effective if effective else "ALL")
 
 # -------------------------------------------------
 # TABS
@@ -211,11 +247,11 @@ tab_rev, tab_exp, tab_cf, tab_tb, tab_qa = st.tabs(
 # Revenue
 with tab_rev:
     st.subheader("Revenue (Monthly)")
-    where, params = build_ui_where()
+    where, params, _eff_func = build_ui_where(override_func="Revenue")  # force Revenue for this tab
 
     sql = f"""
-    select date_trunc('month', date) as month,
-           sum(signed_amount) as revenue
+    select date_trunc('month', "date") as month,
+           sum(coalesce(revenue_amount,0)) as revenue
     from public.v_finance_logic
     where {' and '.join(where)}
       and entry_type = 'revenue'
@@ -236,11 +272,12 @@ with tab_rev:
 # Expense
 with tab_exp:
     st.subheader("Expenses (Monthly)")
-    where, params = build_ui_where()
+    # DO NOT force Revenue here; use UI filters normally
+    where, params, _eff_func = build_ui_where()
 
     sql = f"""
-    select date_trunc('month', date) as month,
-           sum(abs(signed_amount)) as expense
+    select date_trunc('month', "date") as month,
+           sum(coalesce(expense_amount,0)) as expense
     from public.v_finance_logic
     where {' and '.join(where)}
       and entry_type = 'expense'
@@ -261,7 +298,7 @@ with tab_exp:
 # Cashflow
 with tab_cf:
     st.subheader("Cashflow Summary (By Bank & Direction)")
-    where, params = build_ui_where()
+    where, params, _eff_func = build_ui_where(override_func=None)  # ignore func_code for cashflow unless user wants
 
     sql = f"""
     select
@@ -281,41 +318,39 @@ with tab_cf:
         st.dataframe(df_cf, use_container_width=True)
 
         inflow = df_cf[df_cf["Direction"] == "in"]["Amount"].sum()
-        outflow = df_cf[df_cf["Direction"] == "out"]["Amount"].sum()
-        st.success(f"Inflow: {inflow:,.0f} PKR  |  Outflow: {outflow:,.0f} PKR  |  Net: {(inflow+outflow):,.0f} PKR")
+        outflow = df_cf[df_cf["Direction"] == "out"]["Amount"].sum()  # likely negative
+        st.success(f"Inflow: {inflow:,.0f} PKR  |  Outflow: {abs(outflow):,.0f} PKR  |  Net: {(inflow+outflow):,.0f} PKR")
     else:
         st.info("No rows found for selected filters/date range.")
 
 # Trial Balance
 with tab_tb:
     st.subheader("Trial Balance (As of To Date)")
-    params = {"dt": dt}
-    where = ["date <= :dt"]
+
+    # For TB, do not force Revenue; allow UI func_code if set
+    tb_where = ["\"date\" <= :dt"]
+    tb_params = {"dt": dt}
 
     if bank != "ALL":
-        where.append("bank = :bank")
-        params["bank"] = bank
+        tb_where.append("bank = :bank"); tb_params["bank"] = bank
     if head != "ALL":
-        where.append("head_name = :head")
-        params["head"] = head
+        tb_where.append("head_name = :head"); tb_params["head"] = head
     if account != "ALL":
-        where.append("account = :account")
-        params["account"] = account
+        tb_where.append("account = :account"); tb_params["account"] = account
     if func_code != "ALL":
-        where.append("func_code = :func_code")
-        params["func_code"] = func_code
+        tb_where.append("func_code = :func_code"); tb_params["func_code"] = func_code
 
     sql = f"""
     select
       account,
       sum(signed_amount) as balance
     from public.v_finance_logic
-    where {' and '.join(where)}
+    where {' and '.join(tb_where)}
     group by 1
     order by 1
     """
     with engine.connect() as conn:
-        rows = conn.execute(text(sql), params).fetchall()
+        rows = conn.execute(text(sql), tb_params).fetchall()
 
     if rows:
         df_tb = pd.DataFrame(rows, columns=["Account", "Balance"])
@@ -324,7 +359,9 @@ with tab_tb:
     else:
         st.info("No rows found for trial balance with current filters.")
 
+# -------------------------------------------------
 # AI Q&A
+# -------------------------------------------------
 with tab_qa:
     st.subheader("Ask a Finance Question (Deterministic + Search)")
 
@@ -332,24 +369,31 @@ with tab_qa:
         "Examples: How much expense from July to January | Revenue per month | Trial balance as of date | Recoup pending amount | Fuel expense in Dec"
     )
 
-    q = st.text_input("Ask anything…", placeholder="How much expense from July to January?")
+    q = st.text_input("Ask anything…", placeholder="Revenue by head | Pending recoup amount | Which account has highest expense?")
 
     if q:
+        ql = q.lower()
         intent = detect_intent(q)
         payee = extract_payee(q)
 
-        where, params = build_ui_where()
+        # 🔥 fix: override func_code based on intent, unless explicitly asked in question
+        override_func = apply_intent_func_override(intent, q, func_code)
 
+        # Build WHERE using override_func
+        where, params, effective_func_display = build_ui_where(override_func=override_func)
+
+        # date inference overrides UI date filter
         date_sql, date_params = infer_date_sql(q)
         if date_sql:
-            where = [w for w in where if "date between" not in w]
+            where = [w for w in where if "between :df and :dt" not in w and "\"date\" between" not in w]
             where.insert(0, date_sql)
             params.update(date_params)
 
+        # month range parsing overrides date filter
         m_start, m_end_excl = parse_month_range(q)
         if m_start and m_end_excl:
-            where = [w for w in where if "date between" not in w and "date >=" not in w and "date <" not in w]
-            where.insert(0, "date >= :m_start and date < :m_end")
+            where = [w for w in where if "between :df and :dt" not in w and "\"date\" between" not in w and "\"date\" >=" not in w and "\"date\" <" not in w]
+            where.insert(0, "\"date\" >= :m_start and \"date\" < :m_end")
             params["m_start"] = m_start
             params["m_end"] = m_end_excl
 
@@ -359,23 +403,134 @@ with tab_qa:
 
         where_sql = " and ".join(where)
 
-        if intent == "revenue":
-            sql = f"""
-            select coalesce(sum(signed_amount),0)
-            from public.v_finance_logic
-            where {where_sql}
-              and entry_type='revenue'
-            """
-            label = "Total Revenue"
+        # ---------- intent-specific routing ----------
+        label = ""
+        sql = ""
 
+        # Revenue sub-modes
+        if intent == "revenue":
+            by_head = ("by head" in ql) or ("head wise" in ql) or ("head-wise" in ql)
+            by_bank = ("by bank" in ql) or ("bank wise" in ql) or ("bank-wise" in ql)
+            per_month = ("per month" in ql) or ("monthly" in ql) or ("trend" in ql) or ("month" in ql)
+
+            if by_head:
+                sql = f"""
+                select head_name, sum(coalesce(revenue_amount,0)) as revenue
+                from public.v_finance_logic
+                where {where_sql}
+                  and entry_type='revenue'
+                group by 1
+                order by 2 desc
+                limit 50
+                """
+                label = "Revenue by Head"
+            elif by_bank:
+                sql = f"""
+                select coalesce(bank,'UNKNOWN') as bank, sum(coalesce(revenue_amount,0)) as revenue
+                from public.v_finance_logic
+                where {where_sql}
+                  and entry_type='revenue'
+                group by 1
+                order by 2 desc
+                """
+                label = "Revenue by Bank"
+            elif per_month:
+                sql = f"""
+                select date_trunc('month',"date") as month, sum(coalesce(revenue_amount,0)) as revenue
+                from public.v_finance_logic
+                where {where_sql}
+                  and entry_type='revenue'
+                group by 1
+                order by 1
+                """
+                label = "Monthly Revenue"
+            else:
+                sql = f"""
+                select coalesce(sum(coalesce(revenue_amount,0)),0)
+                from public.v_finance_logic
+                where {where_sql}
+                  and entry_type='revenue'
+                """
+                label = "Total Revenue"
+
+        # Expense sub-modes
         elif intent == "expense":
-            sql = f"""
-            select coalesce(sum(abs(signed_amount)),0)
-            from public.v_finance_logic
-            where {where_sql}
-              and entry_type='expense'
-            """
-            label = "Total Expense"
+            highest_account = ("highest" in ql or "top" in ql) and "account" in ql
+            by_account = ("by account" in ql) or ("account wise" in ql) or ("account-wise" in ql)
+            per_month = ("per month" in ql) or ("monthly" in ql) or ("trend" in ql) or ("month" in ql)
+
+            if highest_account:
+                sql = f"""
+                select account, sum(coalesce(expense_amount,0)) as expense
+                from public.v_finance_logic
+                where {where_sql}
+                  and entry_type='expense'
+                group by 1
+                order by 2 desc
+                limit 10
+                """
+                label = "Top Expense Accounts"
+            elif by_account:
+                sql = f"""
+                select account, sum(coalesce(expense_amount,0)) as expense
+                from public.v_finance_logic
+                where {where_sql}
+                  and entry_type='expense'
+                group by 1
+                order by 2 desc
+                limit 50
+                """
+                label = "Expense by Account"
+            elif per_month:
+                sql = f"""
+                select date_trunc('month',"date") as month, sum(coalesce(expense_amount,0)) as expense
+                from public.v_finance_logic
+                where {where_sql}
+                  and entry_type='expense'
+                group by 1
+                order by 1
+                """
+                label = "Monthly Expense"
+            else:
+                sql = f"""
+                select coalesce(sum(coalesce(expense_amount,0)),0)
+                from public.v_finance_logic
+                where {where_sql}
+                  and entry_type='expense'
+                """
+                label = "Total Expense"
+
+        # Recoup sub-modes
+        elif intent == "recoup":
+            pending = ("pending" in ql) or ("outstanding" in ql) or ("not recouped" in ql)
+            recouped = ("recouped" in ql) or ("settled" in ql)
+
+            if pending:
+                sql = f"""
+                select coalesce(sum(coalesce(recoup_pending_amount,0)),0)
+                from public.v_finance_logic
+                where {where_sql}
+                  and entry_type='recoup'
+                  and recoup_state='pending'
+                """
+                label = "Pending Recoup Amount"
+            elif recouped:
+                sql = f"""
+                select coalesce(sum(abs(signed_amount)),0)
+                from public.v_finance_logic
+                where {where_sql}
+                  and entry_type='recoup'
+                  and recoup_state='recouped'
+                """
+                label = "Recouped Total"
+            else:
+                sql = f"""
+                select coalesce(sum(abs(signed_amount)),0)
+                from public.v_finance_logic
+                where {where_sql}
+                  and entry_type='recoup'
+                """
+                label = "Recoup Total"
 
         elif intent == "cashflow":
             sql = f"""
@@ -391,35 +546,14 @@ with tab_qa:
             label = "Cashflow"
 
         elif intent == "trial_balance":
-            tb_where = ["date <= :dt"]
-            tb_params = {"dt": dt}
-            if bank != "ALL":
-                tb_where.append("bank = :bank"); tb_params["bank"] = bank
-            if head != "ALL":
-                tb_where.append("head_name = :head"); tb_params["head"] = head
-            if account != "ALL":
-                tb_where.append("account = :account"); tb_params["account"] = account
-            if func_code != "ALL":
-                tb_where.append("func_code = :func_code"); tb_params["func_code"] = func_code
-
             sql = f"""
             select account, sum(signed_amount) as balance
             from public.v_finance_logic
-            where {' and '.join(tb_where)}
+            where {where_sql}
             group by 1
             order by 1
             """
             label = "Trial Balance"
-            params = tb_params
-
-        elif intent == "recoup":
-            sql = f"""
-            select coalesce(sum(abs(signed_amount)),0)
-            from public.v_finance_logic
-            where {where_sql}
-              and entry_type='recoup'
-            """
-            label = "Recoup Total"
 
         else:
             params["q"] = q
@@ -434,46 +568,51 @@ with tab_qa:
             """
             label = "Total (Search matched)"
 
+        # ---------- run + render ----------
         with engine.connect() as conn:
-            if intent in ("cashflow", "trial_balance"):
+            if intent in ("cashflow", "trial_balance") or ("group by" in sql.lower()):
                 rows = conn.execute(text(sql), params).fetchall()
-                if intent == "cashflow":
-                    if rows:
-                        df_out = pd.DataFrame(rows, columns=["Bank", "Direction", "Amount"])
-                        st.dataframe(df_out, use_container_width=True)
-                        inflow = df_out[df_out["Direction"] == "in"]["Amount"].sum()
-                        outflow = df_out[df_out["Direction"] == "out"]["Amount"].sum()
-                        st.success(f"Inflow: {inflow:,.0f} PKR | Outflow: {outflow:,.0f} PKR | Net: {(inflow+outflow):,.0f} PKR")
-                    else:
-                        st.warning("No rows found for this cashflow question.")
+
+                if not rows:
+                    st.warning("No rows found for this question with current filters.")
                 else:
-                    if rows:
-                        df_out = pd.DataFrame(rows, columns=["Account", "Balance"])
-                        st.dataframe(df_out, use_container_width=True)
-                        st.success(f"Net (sum of balances): {df_out['Balance'].sum():,.0f} PKR")
+                    # Show grouped outputs as tables
+                    if label in ("Cashflow", "Trial Balance"):
+                        if label == "Cashflow":
+                            df_out = pd.DataFrame(rows, columns=["Bank", "Direction", "Amount"])
+                            st.dataframe(df_out, use_container_width=True)
+                            inflow = df_out[df_out["Direction"] == "in"]["Amount"].sum()
+                            outflow = df_out[df_out["Direction"] == "out"]["Amount"].sum()
+                            st.success(f"Inflow: {inflow:,.0f} PKR | Outflow: {abs(outflow):,.0f} PKR | Net: {(inflow+outflow):,.0f} PKR")
+                        else:
+                            df_out = pd.DataFrame(rows, columns=["Account", "Balance"])
+                            st.dataframe(df_out, use_container_width=True)
+                            st.success(f"Net (sum of balances): {df_out['Balance'].sum():,.0f} PKR")
                     else:
-                        st.warning("No rows found for this trial balance question.")
+                        # Generic grouped output
+                        df_out = pd.DataFrame(rows)
+                        # Try to name columns based on label patterns
+                        if label in ("Revenue by Head", "Expense by Account"):
+                            df_out.columns = ["Key", "Amount"]
+                        elif label in ("Revenue by Bank",):
+                            df_out.columns = ["Key", "Amount"]
+                        elif label in ("Monthly Revenue", "Monthly Expense"):
+                            df_out.columns = ["Month", "Amount"]
+                        elif label in ("Top Expense Accounts",):
+                            df_out.columns = ["Account", "Expense"]
+
+                        st.dataframe(df_out, use_container_width=True)
+
+                        # friendly totals
+                        if "Amount" in df_out.columns:
+                            st.success(f"{label} (Total): {df_out['Amount'].sum():,.0f} PKR")
+                        elif "Expense" in df_out.columns:
+                            st.success(f"{label} (Total): {df_out['Expense'].sum():,.0f} PKR")
             else:
                 val = conn.execute(text(sql), params).scalar() or 0
                 st.success(f"{label}: {val:,.0f} PKR")
 
-            confidence = None
-            if intent == "search":
-                conf_sql = f"""
-                select greatest(
-                    coalesce(max(similarity(search_text, :q)), 0),
-                    coalesce(max(ts_rank(search_tsv, plainto_tsquery('simple', :q))), 0)
-                ) as score
-                from public.v_finance_logic
-                where {where_sql}
-                  and (
-                    search_text % :q
-                    or search_tsv @@ plainto_tsquery('simple', :q)
-                  )
-                """
-                score = conn.execute(text(conf_sql), params).scalar() or 0
-                confidence = round(min(float(score), 1.0) * 100)
-
+        # ---------- explain ----------
         with st.expander("🔍 Why this result?"):
             st.write(f"Intent detected: `{intent}`")
             if payee:
@@ -481,7 +620,5 @@ with tab_qa:
             if m_start and m_end_excl:
                 st.write(f"Month range: `{m_start}` to `{m_end_excl}` (end exclusive)")
             st.write("Filters applied:")
-            st.write(f"- Bank: `{bank}`  |  Head: `{head}`  |  Account: `{account}`  |  Function: `{func_code}`")
+            st.write(f"- Bank: `{bank}`  |  Head: `{head}`  |  Account: `{account}`  |  Function: `{effective_func_display}`")
             st.write(f"- From: `{df}`  |  To: `{dt}`")
-            if confidence is not None:
-                st.write(f"Search confidence: **{confidence}%**")
