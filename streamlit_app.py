@@ -10,7 +10,7 @@ import re
 # -------------------------------------------------
 # PAGE CONFIG
 # -------------------------------------------------
-st.set_page_config(page_title="Finance Analytics System", layout="wide")
+st.set_page_config(page_title="KOFHA Finance Analytics System MADE BY NAUSHAD", layout="wide")
 
 # -------------------------------------------------
 # DB / ENGINE
@@ -179,7 +179,7 @@ def detect_structure(q: str):
 # -------------------------------------------------
 USE_UI = object()  # sentinel
 
-def build_where_from_ui(df, dt, bank, head, account, func_code, *, func_override=USE_UI):
+def build_where_from_ui(df, dt, bank, head, account, attribute, func_code, *, func_override=USE_UI):
     """Build WHERE + params from UI. func_override affects ONLY func_code filter."""
     where = ['"date" between :df and :dt']
     params = {"df": df, "dt": dt}
@@ -190,6 +190,9 @@ def build_where_from_ui(df, dt, bank, head, account, func_code, *, func_override
         where.append("head_name = :head"); params["head"] = head
     if account != "ALL":
         where.append("account = :account"); params["account"] = account
+    # New attribute filter
+    if attribute != "ALL":
+        where.append("attribute = :attribute"); params["attribute"] = attribute
 
     # Decide effective func filter
     if func_override is USE_UI:
@@ -383,6 +386,13 @@ with st.container():
     bank = st.selectbox("Bank", ["ALL"] + get_distinct("bank"))
     head = st.selectbox("Head", ["ALL"] + get_distinct("head_name"))
     account = st.selectbox("Account", ["ALL"] + get_distinct("account"))
+    # New attribute filter
+    # Attempt to fetch distinct values from the 'attribute' column; if it doesn't exist, fallback to empty list
+    try:
+        attributes = get_distinct("attribute")
+    except Exception:
+        attributes = []
+    attribute = st.selectbox("Attribute", ["ALL"] + sorted(attributes))
     func_code = st.selectbox("Function Code", ["ALL"] + get_distinct("func_code"))
 
 # -------------------------------------------------
@@ -394,7 +404,7 @@ tab_rev, tab_exp, tab_cf, tab_tb, tab_rec, tab_qa = st.tabs(
 # ---------------- Revenue tab ----------------
 with tab_rev:
     st.subheader("Revenue (Monthly)")
-    where, params, _ = build_where_from_ui(df, dt, bank, head, account, func_code, func_override="Revenue")
+    where, params, _ = build_where_from_ui(df, dt, bank, head, account, attribute, func_code, func_override="Revenue")
 
     sql = f"""
     select date_trunc('month', "date") as month,
@@ -419,7 +429,7 @@ with tab_rev:
 # ---------------- Expense tab ----------------
 with tab_exp:
     st.subheader("Expenses (Monthly)")
-    where, params, _ = build_where_from_ui(df, dt, bank, head, account, func_code, func_override=None)
+    where, params, _ = build_where_from_ui(df, dt, bank, head, account, attribute, func_code, func_override=None)
 
     sql = f"""
     select date_trunc('month', "date") as month,
@@ -444,7 +454,7 @@ with tab_exp:
 # ---------------- Cashflow tab ----------------
 with tab_cf:
     st.subheader("Cashflow Summary (By Bank & Direction)")
-    where, params, _ = build_where_from_ui(df, dt, bank, head, account, func_code, func_override=None)
+    where, params, _ = build_where_from_ui(df, dt, bank, head, account, attribute, func_code, func_override=None)
 
     sql = f"""
     select
@@ -518,7 +528,7 @@ with tab_rec:
         bank_assignment = st.text_input("Assignment Bank (exclude / specific KPIs)", value=BANK_ASSIGNMENT_DEFAULT)
 
     # Use UI filters but ignore func_code for recoup KPIs by default
-    where, params, _ = build_where_from_ui(df, dt, bank, head, account, func_code, func_override=None)
+    where, params, _ = build_where_from_ui(df, dt, bank, head, account, attribute, func_code, func_override=None)
     where_sql = " and ".join(where)
 
     kpis = compute_powerpivot_metrics(where_sql, params, bank_revenue=bank_revenue, bank_assignment=bank_assignment)
@@ -565,7 +575,7 @@ with tab_qa:
 
         # Build WHERE from UI + intent override (SQL-only)
         func_override = apply_intent_func_override(intent, q, func_code)
-        where, params, effective_func = build_where_from_ui(df, dt, bank, head, account, func_code, func_override=func_override)
+        where, params, effective_func = build_where_from_ui(df, dt, bank, head, account, attribute, func_code, func_override=func_override)
 
         # Override date filter if question specifies relative dates
         date_sql, date_params = infer_date_sql(q)
@@ -873,7 +883,7 @@ with tab_qa:
             if m_start and m_end_excl:
                 st.write(f"Month range: `{m_start}` to `{m_end_excl}` (end exclusive)")
             st.write("Filters applied:")
-            st.write(f"- Bank: `{bank}`  |  Head: `{head}`  |  Account: `{account}`  |  Function: `{func_code}`")
+            st.write(f"- Bank: `{bank}`  |  Head: `{head}`  |  Account: `{account}`  |  Attribute: `{attribute}`  |  Function: `{func_code}`")
             st.write(f"- From: `{df}`  |  To: `{dt}`")
             st.write("SQL (debug):")
             st.code(sql.strip())
