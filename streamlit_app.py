@@ -207,13 +207,12 @@ with st.container():
     account = st.selectbox("Account", ["ALL"] + get_distinct("account"))
     func_code = st.selectbox("Function Code", ["ALL"] + get_distinct("func_code"))
 
-def build_ui_where(func_override=None):
+def build_ui_where(override_func="USE_UI"):
     """
-    func_override:
-      None   -> ignore function filter completely
-      "ALL"  -> ignore function filter
-      "Revenue" (or any value) -> force that function
-      "USE_UI" -> use dropdown as-is (default)
+    override_func:
+      - "USE_UI" => use Function Code dropdown as-is (default)
+      - None / "ALL" => ignore Function Code filter
+      - any string (e.g. "Revenue") => force Function Code filter to that value
     """
     where = []
     params = {"df": df, "dt": dt}
@@ -226,18 +225,19 @@ def build_ui_where(func_override=None):
     if account != "ALL":
         where.append("account = :account"); params["account"] = account
 
-    effective_func = func_code  # UI value
-    if func_override is None or func_override == "ALL":
+    # Determine effective function filter
+    if override_func == "USE_UI":
+        effective_func = func_code
+    elif override_func is None or override_func == "ALL":
         effective_func = "ALL"
-    elif func_override and func_override != "USE_UI":
-        effective_func = func_override
+    else:
+        effective_func = override_func
 
     if effective_func != "ALL":
         where.append("func_code = :func_code")
         params["func_code"] = effective_func
 
     return where, params, effective_func
-
 # -------------------------------------------------
 # TABS
 # -------------------------------------------------
@@ -596,5 +596,5 @@ with tab_qa:
             if m_start and m_end_excl:
                 st.write(f"Month range: `{m_start}` to `{m_end_excl}` (end exclusive)")
             st.write("Filters applied:")
-            st.write(f"- Bank: `{bank}`  |  Head: `{head}`  |  Account: `{account}`  |  Function: `{func_code}`")
+            st.write(f"- Bank: `{bank}`  |  Head: `{head}`  |  Account: `{account}`  |  Function: `{effective_func_display}`")
             st.write(f"- From: `{df}`  |  To: `{dt}`")
