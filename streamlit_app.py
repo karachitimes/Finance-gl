@@ -44,8 +44,16 @@ st.title("📊 Finance Analytics System")
 try:
     ok = test_connection(engine)
     st.success("Database connected ✅")
-except OperationalError:
-    st.error("Database connection failed. Check DATABASE_URL (URL-encoding + sslmode) and Supabase host/port.")
+
+except OperationalError as e:
+    st.error("Database connection failed")
+
+    try:
+        real_err = str(e.orig)
+    except:
+        real_err = str(e)
+
+    st.code(real_err)   # 👈 THIS shows the real PostgreSQL error
     st.stop()
 
 @st.cache_data
@@ -285,7 +293,5 @@ if q:
             st.write("Data Columns:")
             st.write("• debit_payment (expenses)")
             st.write("• credit_deposit (receipts)")
-            if confidence:
-                st.write(f"AI Confidence: {confidence}%")
 
 st.divider()
