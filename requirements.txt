@@ -1,5 +1,7 @@
 streamlit
-sqlalchemy
-psycopg[binary]
-sentence-transformers
-torch
+sqlalchemy>=2.0
+psycopg2-binary>=2.9
+
+
+
+
