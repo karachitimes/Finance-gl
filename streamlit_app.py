@@ -171,6 +171,13 @@ def parse_explicit_func_code(q: str) -> str | None:
     matches = get_close_matches(raw.title(), KNOWN_FUNC_CODES, n=1, cutoff=0.6)
     return matches[0] if matches else raw.title()
 
+def func_override_for_intent(intent: str):
+    if intent == "revenue":
+        return "Revenue"     # force revenue in SQL
+    if intent in ("expense", "recoup"):
+        return None          # ignore func_code in SQL
+    return USE_UI            # normal UI behavior
+
 def apply_intent_func_override(intent: str, question: str, ui_func_code: str) -> str | None:
     """
     Returns:
@@ -207,34 +214,45 @@ with st.container():
     account = st.selectbox("Account", ["ALL"] + get_distinct("account"))
     func_code = st.selectbox("Function Code", ["ALL"] + get_distinct("func_code"))
 
-def build_ui_where(func_override=None):
-    """
-    func_override:
-      None   -> ignore function filter completely
-      "ALL"  -> ignore function filter
-      "Revenue" (or any value) -> force that function
-      "USE_UI" -> use dropdown as-is (default)
-    """
-    where = []
+USE_UI = object()   # sentinel (cannot clash with real values)
+
+def build_ui_where(
+    *,
+    df,
+    dt,
+    bank,
+    head,
+    account,
+    func_code,
+    func_override=USE_UI
+):
+    where = ['"date" BETWEEN :df AND :dt']
     params = {"df": df, "dt": dt}
-    where.append("\"date\" between :df and :dt")
 
     if bank != "ALL":
-        where.append("bank = :bank"); params["bank"] = bank
-    if head != "ALL":
-        where.append("head_name = :head"); params["head"] = head
-    if account != "ALL":
-        where.append("account = :account"); params["account"] = account
+        where.append("bank = :bank")
+        params["bank"] = bank
 
-    effective_func = func_code  # UI value
-    if func_override is None or func_override == "ALL":
-        effective_func = "ALL"
-    elif func_override and func_override != "USE_UI":
-        effective_func = func_override
+    if head != "ALL":
+        where.append("head_name = :head")
+        params["head"] = head
+
+    if account != "ALL":
+        where.append("account = :account")
+        params["account"] = account
+
+    # ---------- FUNCTION CODE LOGIC (SQL ONLY) ----------
+    if func_override is USE_UI:
+        effective_func = func_code        # normal UI behavior
+    elif func_override in (None, "ALL"):
+        effective_func = "ALL"             # ignore func_code
+    else:
+        effective_func = func_override     # forced by intent
 
     if effective_func != "ALL":
         where.append("func_code = :func_code")
         params["func_code"] = effective_func
+    # ---------------------------------------------------
 
     return where, params, effective_func
 
@@ -376,12 +394,21 @@ with tab_qa:
         ql = q.lower()
         intent = detect_intent(q)
         payee = extract_payee(q)
+        func_override = func_override_for_intent(intent)
 
         # 🔥 fix: override func_code based on intent, unless explicitly asked in question
         override_func = apply_intent_func_override(intent, q, func_code)
 
         # Build WHERE using override_func
-        where, params, effective_func_display = build_ui_where(override_func=override_func)
+        where, params, effective_func = build_ui_where(
+            df=df, dt=dt,
+            bank=bank,
+            head=head,
+            account=account,
+            func_code=func_code,
+            func_override=func_override
+        )
+        where_sql = " AND ".join(where)
 
         # date inference overrides UI date filter
         date_sql, date_params = infer_date_sql(q)
