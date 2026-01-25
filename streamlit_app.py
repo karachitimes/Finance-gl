@@ -119,15 +119,15 @@ def infer_date_sql(q: str):
 
     if "last month" in ql:
         return (
-            "\"date\" >= date_trunc('month', current_date) - interval '1 month' "
-            "and \"date\" < date_trunc('month', current_date)",
+            "\"date\" >= date_trunc(\'month\', current_date) - interval '1 month' "
+            "and \"date\" < date_trunc(\'month\', current_date)",
             {}
         )
 
     if "this month" in ql:
         return (
-            "\"date\" >= date_trunc('month', current_date) "
-            "and \"date\" < date_trunc('month', current_date) + interval '1 month'",
+            "\"date\" >= date_trunc(\'month\', current_date) "
+            "and \"date\" < date_trunc(\'month\', current_date) + interval '1 month'",
             {}
         )
 
@@ -363,15 +363,27 @@ with tab_qa:
         # Override date filter if question specifies relative dates
         date_sql, date_params = infer_date_sql(q)
         if date_sql:
-            where = [w for w in where if "between :df and :dt" not in w and ""date" between" not in w]
+            
+            where = [
+                w for w in where
+                if "between :df and :dt" not in w
+                and '"date" between' not in w
+            ]
             where.insert(0, date_sql)
             params.update(date_params)
 
         # Month-range overrides date filter
         m_start, m_end_excl = parse_month_range(q)
         if m_start and m_end_excl:
-            where = [w for w in where if "between :df and :dt" not in w and ""date" between" not in w and ""date" >=" not in w and ""date" <" not in w]
-            where.insert(0, ""date" >= :m_start and "date" < :m_end")
+            where = [
+                w for w in where
+                if "between :df and :dt" not in w
+                and '"date" between' not in w
+                and '"date" >=' not in w
+                and '"date" <' not in w
+            ]
+
+            where.insert(0, '"date" >= :m_start and "date" < :m_end')
             params["m_start"] = m_start
             params["m_end"] = m_end_excl
 
