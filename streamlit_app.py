@@ -821,24 +821,46 @@ with tab_qa:
                         st.dataframe(df_out, use_container_width=True)
                         st.success(f"Net (sum of balances): {df_out['Balance'].sum():,.0f} PKR")
                     else:
-                        # heuristic naming
-                        if "Revenue by Head (Monthly)" in label:
-                            df_out.columns = ["Month", "Head", "Revenue"]
-                        elif "Expense by Head (Monthly)" in label:
-                            df_out.columns = ["Month", "Head", "Expense"]
-                        elif label == "Monthly Revenue":
-                            df_out.columns = ["Month", "Revenue"]
-                            st.line_chart(df_out.set_index("Month"))
-                        elif label == "Monthly Expense":
-                            df_out.columns = ["Month", "Expense"]
-                            st.line_chart(df_out.set_index("Month"))
-                        elif label in ("Revenue by Head", "Expense by Head"):
-                            df_out.columns = ["Head", "Amount"]
-                        elif label == "Revenue by Bank":
-                            df_out.columns = ["Bank", "Revenue"]
-
-                        st.subheader(label)
-                        st.dataframe(df_out, use_container_width=True)
+                        # special handling for head-by-month reports: pivot months to columns
+                        if "Revenue by Head (Monthly)" in label or "Expense by Head (Monthly)" in label:
+                            # Standardize column names
+                            if "Revenue" in label:
+                                df_out.columns = ["Month", "Head", "Revenue"]
+                                value_col = "Revenue"
+                            else:
+                                df_out.columns = ["Month", "Head", "Expense"]
+                                value_col = "Expense"
+                            # Convert Month to datetime for proper sorting
+                            df_out["Month"] = pd.to_datetime(df_out["Month"])
+                            # Pivot to get months as columns
+                            df_pivot = df_out.pivot(index="Head", columns="Month", values=value_col).fillna(0)
+                            # Sort month columns chronologically
+                            df_pivot = df_pivot.reindex(sorted(df_pivot.columns), axis=1)
+                            # Rename columns to abbreviated month-year format
+                            df_pivot.columns = [dt.strftime('%b-%y') for dt in df_pivot.columns]
+                            # Reset index to turn Head into a column
+                            df_pivot = df_pivot.reset_index().rename(columns={"Head": "Head Name"})
+                            st.subheader(label)
+                            st.dataframe(df_pivot, use_container_width=True)
+                        else:
+                            # heuristic naming for other reports
+                            if label == "Monthly Revenue":
+                                df_out.columns = ["Month", "Revenue"]
+                                st.line_chart(df_out.set_index("Month"))
+                            elif label == "Monthly Expense":
+                                df_out.columns = ["Month", "Expense"]
+                                st.line_chart(df_out.set_index("Month"))
+                            elif label in ("Revenue by Head", "Expense by Head"):
+                                df_out.columns = ["Head", "Amount"]
+                            elif label == "Revenue by Bank":
+                                df_out.columns = ["Bank", "Revenue"]
+                            elif "Revenue by Head (Monthly)" in label:
+                                df_out.columns = ["Month", "Head", "Revenue"]
+                            elif "Expense by Head (Monthly)" in label:
+                                df_out.columns = ["Month", "Head", "Expense"]
+                            # Display table
+                            st.subheader(label)
+                            st.dataframe(df_out, use_container_width=True)
             else:
                 val = conn.execute(text(sql), params).scalar() or 0
                 st.success(f"{label}: {val:,.0f} PKR")
