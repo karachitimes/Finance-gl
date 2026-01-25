@@ -1,10 +1,11 @@
 import streamlit as st
 from sqlalchemy import create_engine, text
 from datetime import date
+from sqlalchemy.exc import OperationalError
+
 from difflib import get_close_matches
 import re
 
-from sentence_transformers import SentenceTransformer, util
 
 # -------------------------------------------------
 # CONFIG
@@ -14,26 +15,44 @@ st.set_page_config(page_title="Finance System", layout="wide")
 DATABASE_URL = st.secrets["DATABASE_URL"]
 
 
-engine = create_engine(DATABASE_URL, pool_pre_ping=True)
 
 
 # -------------------------------------------------
 # EMBEDDING MODEL
 # -------------------------------------------------
-@st.cache_resource
-def load_embedding_model():
-    return SentenceTransformer("all-MiniLM-L6-v2")
+def get_engine():
+    url = st.secrets["DATABASE_URL"]
+    return create_engine(
+        url,
+        pool_pre_ping=True,
+        pool_recycle=1800,
+        pool_size=3,
+        max_overflow=2,
+    )
+def test_connection(engine):
+    with engine.connect() as conn:
+        return conn.execute(text("select 1")).scalar()
 
-embedder = load_embedding_model()
+engine = get_engine()			
 
 # -------------------------------------------------
 # HELPERS
 # -------------------------------------------------
+# Render UI first, then connect
+st.title("📊 Finance Analytics System")
+
+try:
+    ok = test_connection(engine)
+    st.success("Database connected ✅")
+except OperationalError:
+    st.error("Database connection failed. Check DATABASE_URL (URL-encoding + sslmode) and Supabase host/port.")
+    st.stop()
+
 @st.cache_data
 def get_distinct(col):
-    q = f"SELECT DISTINCT {col} FROM v_finance_logic WHERE {col} IS NOT NULL ORDER BY {col}"
+    q = text(f"SELECT DISTINCT {col} FROM v_finance_logic WHERE {col} IS NOT NULL ORDER BY {col}")
     with engine.connect() as conn:
-        return [r[0] for r in conn.execute(text(q)).fetchall()]
+        return [r[0] for r in conn.execute(q).fetchall()]
 
 @st.cache_data
 def get_known_payees():
@@ -253,20 +272,6 @@ if q:
             val = conn.execute(text(sql), params).scalar() or 0
             st.success(f"Total : {val:,.0f} PKR")
 
-        # -----------------------------
-        # CONFIDENCE SCORE
-        # -----------------------------
-        confidence = None
-        if parsed["semantic_subject"]:
-            q_emb = embedder.encode(parsed["semantic_subject"], convert_to_tensor=True)
-            t_emb = embedder.encode(" ".join(matched_columns), convert_to_tensor=True)
-            confidence = round(float(util.cos_sim(q_emb, t_emb)) * 100)
-
-        if confidence is not None:
-            st.caption(f"Confidence Score: {confidence}%")
-
-        if matched_columns:
-            st.caption("Matched via: " + ", ".join(set(matched_columns)))
 
         # -----------------------------
         # EXPLANATION
