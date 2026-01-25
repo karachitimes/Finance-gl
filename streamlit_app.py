@@ -8,6 +8,16 @@ import calendar
 import re
 
 # -------------------------------------------------
+# SAFE DEFAULTS (avoid NameError during refactors / early renders)
+# -------------------------------------------------
+df = date(2025, 1, 1)
+dt = date.today()
+bank = 'ALL'
+head = 'ALL'
+account = 'ALL'
+func_code = 'ALL'
+
+# -------------------------------------------------
 # PAGE CONFIG
 # -------------------------------------------------
 st.set_page_config(page_title="Finance Analytics System", layout="wide")
@@ -192,37 +202,57 @@ def apply_intent_func_override(intent: str, question: str, ui_func_code: str) ->
 
     return "USE_UI"
 
-def build_ui_where(override_func="USE_UI"):
+def build_ui_where(func_override="USE_UI", override_func=None):
     """
-    override_func:
+    Build WHERE filters from current UI state.
+
+    Accepts both:
+      - func_override (legacy)
+      - override_func (new)
+
+    Values:
       - "USE_UI" => use Function Code dropdown as-is (default)
       - None / "ALL" => ignore Function Code filter
       - any string (e.g. "Revenue") => force Function Code filter to that value
+
+    Returns: (where_list, params_dict, effective_func_display)
     """
+    if override_func is not None:
+        func_override = override_func
+
+    # Use globals with safe fallbacks (prevents NameError if UI block moved)
+    dfv = globals().get("df", date(2025, 1, 1))
+    dtv = globals().get("dt", date.today())
+    bankv = globals().get("bank", "ALL")
+    headv = globals().get("head", "ALL")
+    accountv = globals().get("account", "ALL")
+    funcv = globals().get("func_code", "ALL")
+
     where = []
-    params = {"df": df, "dt": dt}
+    params = {"df": dfv, "dt": dtv}
     where.append("\"date\" between :df and :dt")
 
-    if bank != "ALL":
-        where.append("bank = :bank"); params["bank"] = bank
-    if head != "ALL":
-        where.append("head_name = :head"); params["head"] = head
-    if account != "ALL":
-        where.append("account = :account"); params["account"] = account
+    if bankv != "ALL":
+        where.append("bank = :bank"); params["bank"] = bankv
+    if headv != "ALL":
+        where.append("head_name = :head"); params["head"] = headv
+    if accountv != "ALL":
+        where.append("account = :account"); params["account"] = accountv
 
     # Determine effective function filter
-    if override_func == "USE_UI":
-        effective_func = func_code
-    elif override_func is None or override_func == "ALL":
+    if func_override == "USE_UI":
+        effective_func = funcv
+    elif func_override is None or func_override == "ALL":
         effective_func = "ALL"
     else:
-        effective_func = override_func
+        effective_func = func_override
 
     if effective_func != "ALL":
         where.append("func_code = :func_code")
         params["func_code"] = effective_func
 
     return where, params, effective_func
+
 # -------------------------------------------------
 # TABS
 # -------------------------------------------------
@@ -583,18 +613,3 @@ with tab_qa:
             st.write("Filters applied:")
             st.write(f"- Bank: `{bank}`  |  Head: `{head}`  |  Account: `{account}`  |  Function: `{effective_func_display}`")
             st.write(f"- From: `{df}`  |  To: `{dt}`")
-st.write("SQL (debug):")
-st.code(sql.strip())
-st.write("Params (debug):")
-st.json({k: (v.isoformat() if hasattr(v, "isoformat") else v) for k, v in params.items()})
-
-# Quick row-count diagnostics for the intent (non-fatal)
-try:
-    if intent in ("revenue", "expense", "recoup"):
-        diag_sql = f"select count(*) from public.v_finance_logic where {where_sql} and entry_type = :et"
-        diag_params = dict(params)
-        diag_params["et"] = {"revenue":"revenue","expense":"expense","recoup":"recoup"}[intent]
-        cnt = conn.execute(text(diag_sql), diag_params).scalar()
-        st.write(f"Row count for entry_type='{diag_params['et']}': **{cnt}**")
-except Exception:
-    st.write("Diagnostics failed (non-fatal).")
