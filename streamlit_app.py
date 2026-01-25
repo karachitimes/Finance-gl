@@ -8,16 +8,6 @@ import calendar
 import re
 
 # -------------------------------------------------
-# SAFE DEFAULTS (avoid NameError during refactors / early renders)
-# -------------------------------------------------
-df = date(2025, 1, 1)
-dt = date.today()
-bank = 'ALL'
-head = 'ALL'
-account = 'ALL'
-func_code = 'ALL'
-
-# -------------------------------------------------
 # PAGE CONFIG
 # -------------------------------------------------
 st.set_page_config(page_title="Finance Analytics System", layout="wide")
@@ -183,10 +173,10 @@ def parse_explicit_func_code(q: str) -> str | None:
 
 def apply_intent_func_override(intent: str, question: str, ui_func_code: str) -> str | None:
     """
-    Returns a value suitable for build_ui_where(override_func=...):
-      - Explicit function requested in question -> that value (forces filter)
-      - revenue intent -> "USE_UI" (respects dropdown; ALL means no filter)
-      - expense/recoup/cashflow/trial_balance/search -> None (ignore func_code filter)
+    Returns:
+      - 'Revenue' forced for revenue intent (unless user explicitly sets different function)
+      - None to IGNORE func_code filter for expense/recoup/cashflow/trial_balance/search
+      - Or a specific func_code if user explicitly requested it in the question
     """
     explicit = parse_explicit_func_code(question)
 
@@ -195,56 +185,51 @@ def apply_intent_func_override(intent: str, question: str, ui_func_code: str) ->
         return explicit
 
     if intent == "revenue":
-        return "USE_UI"  # respect dropdown; default ALL means no func filter
-
+        return "Revenue"  # force
     if intent in ("expense", "recoup", "cashflow", "trial_balance", "net", "deposit", "search"):
-        return None  # ignore func filter for these intents
+        return None        # ignore func filter for these intents
 
-    return "USE_UI"
+    # fallback: respect UI
+    return None if ui_func_code == "ALL" else ui_func_code
 
-def build_ui_where(func_override="USE_UI", override_func=None):
+# -------------------------------------------------
+# FILTERS (UI)
+# -------------------------------------------------
+with st.container():
+    c1, c2 = st.columns(2)
+    with c1:
+        df = st.date_input("From Date", value=date(2025, 1, 1))
+    with c2:
+        dt = st.date_input("To Date", value=date.today())
+
+    bank = st.selectbox("Bank", ["ALL"] + get_distinct("bank"))
+    head = st.selectbox("Head", ["ALL"] + get_distinct("head_name"))
+    account = st.selectbox("Account", ["ALL"] + get_distinct("account"))
+    func_code = st.selectbox("Function Code", ["ALL"] + get_distinct("func_code"))
+
+def build_ui_where(func_override=None):
     """
-    Build WHERE filters from current UI state.
-
-    Accepts both:
-      - func_override (legacy)
-      - override_func (new)
-
-    Values:
-      - "USE_UI" => use Function Code dropdown as-is (default)
-      - None / "ALL" => ignore Function Code filter
-      - any string (e.g. "Revenue") => force Function Code filter to that value
-
-    Returns: (where_list, params_dict, effective_func_display)
+    func_override:
+      None   -> ignore function filter completely
+      "ALL"  -> ignore function filter
+      "Revenue" (or any value) -> force that function
+      "USE_UI" -> use dropdown as-is (default)
     """
-    if override_func is not None:
-        func_override = override_func
-
-    # Use globals with safe fallbacks (prevents NameError if UI block moved)
-    dfv = globals().get("df", date(2025, 1, 1))
-    dtv = globals().get("dt", date.today())
-    bankv = globals().get("bank", "ALL")
-    headv = globals().get("head", "ALL")
-    accountv = globals().get("account", "ALL")
-    funcv = globals().get("func_code", "ALL")
-
     where = []
-    params = {"df": dfv, "dt": dtv}
+    params = {"df": df, "dt": dt}
     where.append("\"date\" between :df and :dt")
 
-    if bankv != "ALL":
-        where.append("bank = :bank"); params["bank"] = bankv
-    if headv != "ALL":
-        where.append("head_name = :head"); params["head"] = headv
-    if accountv != "ALL":
-        where.append("account = :account"); params["account"] = accountv
+    if bank != "ALL":
+        where.append("bank = :bank"); params["bank"] = bank
+    if head != "ALL":
+        where.append("head_name = :head"); params["head"] = head
+    if account != "ALL":
+        where.append("account = :account"); params["account"] = account
 
-    # Determine effective function filter
-    if func_override == "USE_UI":
-        effective_func = funcv
-    elif func_override is None or func_override == "ALL":
+    effective_func = func_code  # UI value
+    if func_override is None or func_override == "ALL":
         effective_func = "ALL"
-    else:
+    elif func_override and func_override != "USE_UI":
         effective_func = func_override
 
     if effective_func != "ALL":
@@ -611,5 +596,46 @@ with tab_qa:
             if m_start and m_end_excl:
                 st.write(f"Month range: `{m_start}` to `{m_end_excl}` (end exclusive)")
             st.write("Filters applied:")
-            st.write(f"- Bank: `{bank}`  |  Head: `{head}`  |  Account: `{account}`  |  Function: `{effective_func_display}`")
+            st.write(f"- Bank: `{bank}`  |  Head: `{head}`  |  Account: `{account}`  |  Function: `{func_code}`")
             st.write(f"- From: `{df}`  |  To: `{dt}`")
+
+# =================================================
+# PATCH: Safe override support without replacing UI filters
+# =================================================
+
+# Preserve UI filters and only add safe override logic
+
+def build_ui_where_safe(override_func=None):
+    """
+    Same as build_ui_where but does NOT replace UI filters.
+    Only overrides func_code if override_func is provided.
+    """
+    where = []
+    params = {'df': df, 'dt': dt}
+    where.append("\"date\" between :df and :dt")
+
+    if bank != 'ALL':
+        where.append("bank = :bank"); params['bank'] = bank
+    if head != 'ALL':
+        where.append("head_name = :head"); params['head'] = head
+    if account != 'ALL':
+        where.append("account = :account"); params['account'] = account
+
+    effective_func = func_code
+    if override_func not in (None, 'ALL'):
+        effective_func = override_func
+
+    if effective_func != 'ALL':
+        where.append("func_code = :func_code")
+        params['func_code'] = effective_func
+
+    return where, params, effective_func
+
+# ---------------- AI override hook ----------------
+def get_effective_func(intent, question):
+    ql = question.lower()
+    if intent == 'revenue':
+        return 'Revenue'
+    if intent in ('expense','recoup','cashflow','trial_balance','search','net','deposit'):
+        return None
+    return None
