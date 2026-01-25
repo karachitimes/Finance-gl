@@ -173,10 +173,10 @@ def parse_explicit_func_code(q: str) -> str | None:
 
 def apply_intent_func_override(intent: str, question: str, ui_func_code: str) -> str | None:
     """
-    Returns:
-      - 'Revenue' forced for revenue intent (unless user explicitly sets different function)
-      - None to IGNORE func_code filter for expense/recoup/cashflow/trial_balance/search
-      - Or a specific func_code if user explicitly requested it in the question
+    Returns a value suitable for build_ui_where(override_func=...):
+      - Explicit function requested in question -> that value (forces filter)
+      - revenue intent -> "USE_UI" (respects dropdown; ALL means no filter)
+      - expense/recoup/cashflow/trial_balance/search -> None (ignore func_code filter)
     """
     explicit = parse_explicit_func_code(question)
 
@@ -185,27 +185,12 @@ def apply_intent_func_override(intent: str, question: str, ui_func_code: str) ->
         return explicit
 
     if intent == "revenue":
-        return "Revenue"  # force
+        return "USE_UI"  # respect dropdown; default ALL means no func filter
+
     if intent in ("expense", "recoup", "cashflow", "trial_balance", "net", "deposit", "search"):
-        return None        # ignore func filter for these intents
+        return None  # ignore func filter for these intents
 
-    # fallback: respect UI
-    return None if ui_func_code == "ALL" else ui_func_code
-
-# -------------------------------------------------
-# FILTERS (UI)
-# -------------------------------------------------
-with st.container():
-    c1, c2 = st.columns(2)
-    with c1:
-        df = st.date_input("From Date", value=date(2025, 1, 1))
-    with c2:
-        dt = st.date_input("To Date", value=date.today())
-
-    bank = st.selectbox("Bank", ["ALL"] + get_distinct("bank"))
-    head = st.selectbox("Head", ["ALL"] + get_distinct("head_name"))
-    account = st.selectbox("Account", ["ALL"] + get_distinct("account"))
-    func_code = st.selectbox("Function Code", ["ALL"] + get_distinct("func_code"))
+    return "USE_UI"
 
 def build_ui_where(override_func="USE_UI"):
     """
@@ -598,3 +583,18 @@ with tab_qa:
             st.write("Filters applied:")
             st.write(f"- Bank: `{bank}`  |  Head: `{head}`  |  Account: `{account}`  |  Function: `{effective_func_display}`")
             st.write(f"- From: `{df}`  |  To: `{dt}`")
+st.write("SQL (debug):")
+st.code(sql.strip())
+st.write("Params (debug):")
+st.json({k: (v.isoformat() if hasattr(v, "isoformat") else v) for k, v in params.items()})
+
+# Quick row-count diagnostics for the intent (non-fatal)
+try:
+    if intent in ("revenue", "expense", "recoup"):
+        diag_sql = f"select count(*) from public.v_finance_logic where {where_sql} and entry_type = :et"
+        diag_params = dict(params)
+        diag_params["et"] = {"revenue":"revenue","expense":"expense","recoup":"recoup"}[intent]
+        cnt = conn.execute(text(diag_sql), diag_params).scalar()
+        st.write(f"Row count for entry_type='{diag_params['et']}': **{cnt}**")
+except Exception:
+    st.write("Diagnostics failed (non-fatal).")
