@@ -10,7 +10,7 @@ import re
 # -------------------------------------------------
 # PAGE CONFIG
 # -------------------------------------------------
-st.set_page_config(page_title="KOFHA Finance Analytics System MADE BY NAUSHAD", layout="wide")
+st.set_page_config(page_title="Finance Analytics System", layout="wide")
 
 # -------------------------------------------------
 # DB / ENGINE
@@ -406,9 +406,10 @@ with tab_rev:
     st.subheader("Revenue (Monthly)")
     where, params, _ = build_where_from_ui(df, dt, bank, head, account, attribute, func_code, func_override="Revenue")
 
+    # Use abs(signed_amount)/2 to avoid double‐counting mirrored debit/credit rows.
     sql = f"""
     select date_trunc('month', "date") as month,
-           sum(coalesce(gl_amount,0)) as revenue
+           sum(abs(signed_amount))/2 as revenue
     from public.v_finance_logic
     where {' and '.join(where)}
       and entry_type = 'revenue'
@@ -431,9 +432,10 @@ with tab_exp:
     st.subheader("Expenses (Monthly)")
     where, params, _ = build_where_from_ui(df, dt, bank, head, account, attribute, func_code, func_override=None)
 
+    # Use abs(signed_amount)/2 to avoid double‐counting mirrored debit/credit rows for expenses.
     sql = f"""
     select date_trunc('month', "date") as month,
-           sum(coalesce(gl_amount,0)) as expense
+           sum(abs(signed_amount))/2 as expense
     from public.v_finance_logic
     where {' and '.join(where)}
       and entry_type = 'expense'
@@ -619,10 +621,11 @@ with tab_qa:
         if intent == "revenue":
             if struct["by_head"] and struct["monthly"]:
                 label = "Revenue by Head (Monthly)"
+                # Sum absolute signed_amount divided by 2 to avoid double counting mirrored debit/credit rows.
                 sql = f"""
                 select date_trunc('month',"date") as month,
                        head_name,
-                       sum(coalesce(gl_amount,0)) as revenue
+                       sum(abs(signed_amount))/2 as revenue
                 from public.v_finance_logic
                 where {where_sql}
                   and entry_type='revenue'
@@ -633,7 +636,7 @@ with tab_qa:
                 label = "Revenue by Head"
                 sql = f"""
                 select head_name,
-                       sum(coalesce(gl_amount,0)) as revenue
+                       sum(abs(signed_amount))/2 as revenue
                 from public.v_finance_logic
                 where {where_sql}
                   and entry_type='revenue'
@@ -645,7 +648,7 @@ with tab_qa:
                 label = "Revenue by Bank"
                 sql = f"""
                 select coalesce(bank,'UNKNOWN') as bank,
-                       sum(coalesce(gl_amount,0)) as revenue
+                       sum(abs(signed_amount))/2 as revenue
                 from public.v_finance_logic
                 where {where_sql}
                   and entry_type='revenue'
@@ -656,7 +659,7 @@ with tab_qa:
                 label = "Monthly Revenue"
                 sql = f"""
                 select date_trunc('month',"date") as month,
-                       sum(coalesce(gl_amount,0)) as revenue
+                       sum(abs(signed_amount))/2 as revenue
                 from public.v_finance_logic
                 where {where_sql}
                   and entry_type='revenue'
@@ -666,7 +669,7 @@ with tab_qa:
             else:
                 label = "Total Revenue"
                 sql = f"""
-                select coalesce(sum(coalesce(gl_amount,0)),0) as revenue
+                select coalesce(sum(abs(signed_amount))/2,0) as revenue
                 from public.v_finance_logic
                 where {where_sql}
                   and entry_type='revenue'
@@ -676,10 +679,11 @@ with tab_qa:
         elif intent == "expense":
             if struct["by_head"] and struct["monthly"]:
                 label = "Expense by Head (Monthly)"
+                # Sum absolute signed_amount divided by 2 to avoid double counting mirrored debit/credit rows for expenses.
                 sql = f"""
                 select date_trunc('month',"date") as month,
                        head_name,
-                       sum(coalesce(gl_amount,0)) as expense
+                       sum(abs(signed_amount))/2 as expense
                 from public.v_finance_logic
                 where {where_sql}
                   and entry_type='expense'
@@ -690,7 +694,7 @@ with tab_qa:
                 label = "Expense by Head"
                 sql = f"""
                 select head_name,
-                       sum(coalesce(gl_amount,0)) as expense
+                       sum(abs(signed_amount))/2 as expense
                 from public.v_finance_logic
                 where {where_sql}
                   and entry_type='expense'
@@ -702,7 +706,7 @@ with tab_qa:
                 label = "Monthly Expense"
                 sql = f"""
                 select date_trunc('month',"date") as month,
-                       sum(coalesce(gl_amount,0)) as expense
+                       sum(abs(signed_amount))/2 as expense
                 from public.v_finance_logic
                 where {where_sql}
                   and entry_type='expense'
@@ -712,7 +716,7 @@ with tab_qa:
             else:
                 label = "Total Expense"
                 sql = f"""
-                select coalesce(sum(coalesce(gl_amount,0)),0) as expense
+                select coalesce(sum(abs(signed_amount))/2,0) as expense
                 from public.v_finance_logic
                 where {where_sql}
                   and entry_type='expense'
@@ -752,6 +756,8 @@ with tab_qa:
                 where {where_sql}
                   and entry_type='recoup'
                   and recoup_state='pending'
+                  and bill_no ilike '%recoup%'
+                  and {_is_blank_sql('status')}
                 """
             elif recouped:
                 label = "Recouped Total"
@@ -761,6 +767,8 @@ with tab_qa:
                 where {where_sql}
                   and entry_type='recoup'
                   and recoup_state='recouped'
+                  and bill_no ilike '%recoup%'
+                  and {_not_blank_sql('status')}
                 """
             else:
                 label = "Recoup Total"
@@ -769,6 +777,7 @@ with tab_qa:
                 from public.v_finance_logic
                 where {where_sql}
                   and entry_type='recoup'
+                  and bill_no ilike '%recoup%'
                 """
 
         # ---------- Cashflow ----------
