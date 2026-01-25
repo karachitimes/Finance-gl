@@ -68,13 +68,18 @@ KNOWN_PAYEES = get_known_payees()
 KNOWN_FUNC_CODES = get_distinct("func_code")
 
 def best_payee_match(name: str | None):
+    """
+    Return the best matching payee name from KNOWN_PAYEES.
+    If no close match is found, return None instead of the raw name to avoid
+    accidentally treating generic words like 'head' or 'bank' as payees.
+    """
     if not name:
         return None
     name = name.strip()
     if not name:
         return None
     matches = get_close_matches(name.title(), KNOWN_PAYEES, n=1, cutoff=0.75)
-    return matches[0] if matches else name.title()
+    return matches[0] if matches else None
 
 # -------------------------------------------------
 # NLP-ish ROUTING (DETERMINISTIC)
@@ -136,8 +141,14 @@ def infer_date_sql(q: str):
 
 
 def extract_payee(q: str):
+    """
+    Extract a payee name from the question. Only matches patterns like
+    'to <name>' to avoid capturing structures such as 'by head' or 'by bank'.
+    Returns None if the extracted name is not a known payee.
+    """
     ql = q.lower()
-    m = re.search(r"(?:to|by)\s+([a-z\s]+?)(?:\s+with|\s+month|\s+for|$)", ql)
+    # Only match patterns like 'to <payee>' and avoid 'by head', etc.
+    m = re.search(r"(?:to)\s+([a-z\s]+?)(?:\s+with|\s+month|\s+for|$)", ql)
     if m:
         return best_payee_match(m.group(1))
     return None
@@ -706,7 +717,6 @@ with tab_qa:
                 or ("pending recoup minus deposit" in ql)
                 or ("recoup - deposit" in ql)
             )
-
             if pending_minus_deposit:
                 label = "Pending Recoup - Deposit"
                 sql = f"""
@@ -724,7 +734,6 @@ with tab_qa:
                 select (p_debit - p_credit) as pending_minus_deposit from p
                 """
                 params["recoup_start"] = RECoup_START_DATE
-
             elif pending:
                 label = "Pending Recoup Amount"
                 sql = f"""
@@ -734,7 +743,6 @@ with tab_qa:
                   and entry_type='recoup'
                   and recoup_state='pending'
                 """
-
             elif recouped:
                 label = "Recouped Total"
                 sql = f"""
@@ -744,7 +752,6 @@ with tab_qa:
                   and entry_type='recoup'
                   and recoup_state='recouped'
                 """
-
             else:
                 label = "Recoup Total"
                 sql = f"""
