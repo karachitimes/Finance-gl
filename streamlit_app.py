@@ -266,7 +266,14 @@ tab_rev, tab_exp, tab_cf, tab_tb, tab_qa = st.tabs(
 # Revenue
 with tab_rev:
     st.subheader("Revenue (Monthly)")
-    where, params, _eff_func = build_ui_where(override_func="Revenue")  # force Revenue for this tab
+    where, params, _eff_func = build_ui_where(
+        df=df, dt=dt,
+        bank=bank,
+        head=head,
+        account=account,
+        func_code=func_code,
+        func_override="Revenue"
+    )
 
     sql = f"""
     select date_trunc('month', "date") as month,
@@ -292,7 +299,13 @@ with tab_rev:
 with tab_exp:
     st.subheader("Expenses (Monthly)")
     # DO NOT force Revenue here; use UI filters normally
-    where, params, _eff_func = build_ui_where()
+    where, params, _eff_func = build_ui_where(
+        df=df, dt=dt,
+        bank=bank,
+        head=head,
+        account=account,
+        func_code=func_code
+    )
 
     sql = f"""
     select date_trunc('month', "date") as month,
@@ -317,7 +330,14 @@ with tab_exp:
 # Cashflow
 with tab_cf:
     st.subheader("Cashflow Summary (By Bank & Direction)")
-    where, params, _eff_func = build_ui_where(override_func=None)  # ignore func_code for cashflow unless user wants
+    where, params, _eff_func = build_ui_where(
+        df=df, dt=dt,
+        bank=bank,
+        head=head,
+        account=account,
+        func_code=func_code,
+        func_override=None
+    )
 
     sql = f"""
     select
