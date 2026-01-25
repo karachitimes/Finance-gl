@@ -178,6 +178,18 @@ def func_override_for_intent(intent: str):
         return None          # ignore func_code in SQL
     return USE_UI            # normal UI behavior
 
+def detect_structure(q):
+    ql = q.lower()
+    structure = {
+        "by_head": "head" in ql,
+        "by_bank": "bank" in ql,
+        "monthly": "month" in ql or "monthly" in ql,
+        "daily": "daily" in ql,
+        "yearly": "year" in ql,
+    }
+    return structure
+
+
 def apply_intent_func_override(intent: str, question: str, ui_func_code: str) -> str | None:
     """
     Returns:
