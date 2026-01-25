@@ -398,7 +398,7 @@ with tab_rev:
 
     sql = f"""
     select date_trunc('month', "date") as month,
-           sum(coalesce(revenue_amount,0)) as revenue
+           sum(coalesce(gl_amount,0)) as revenue
     from public.v_finance_logic
     where {' and '.join(where)}
       and entry_type = 'revenue'
@@ -423,7 +423,7 @@ with tab_exp:
 
     sql = f"""
     select date_trunc('month', "date") as month,
-           sum(coalesce(expense_amount,0)) as expense
+           sum(coalesce(gl_amount,0)) as expense
     from public.v_finance_logic
     where {' and '.join(where)}
       and entry_type = 'expense'
@@ -612,7 +612,7 @@ with tab_qa:
                 sql = f"""
                 select date_trunc('month',"date") as month,
                        head_name,
-                       sum(coalesce(revenue_amount,0)) as revenue
+                       sum(coalesce(gl_amount,0)) as revenue
                 from public.v_finance_logic
                 where {where_sql}
                   and entry_type='revenue'
@@ -623,7 +623,7 @@ with tab_qa:
                 label = "Revenue by Head"
                 sql = f"""
                 select head_name,
-                       sum(coalesce(revenue_amount,0)) as revenue
+                       sum(coalesce(gl_amount,0)) as revenue
                 from public.v_finance_logic
                 where {where_sql}
                   and entry_type='revenue'
@@ -635,7 +635,7 @@ with tab_qa:
                 label = "Revenue by Bank"
                 sql = f"""
                 select coalesce(bank,'UNKNOWN') as bank,
-                       sum(coalesce(revenue_amount,0)) as revenue
+                       sum(coalesce(gl_amount,0)) as revenue
                 from public.v_finance_logic
                 where {where_sql}
                   and entry_type='revenue'
@@ -646,7 +646,7 @@ with tab_qa:
                 label = "Monthly Revenue"
                 sql = f"""
                 select date_trunc('month',"date") as month,
-                       sum(coalesce(revenue_amount,0)) as revenue
+                       sum(coalesce(gl_amount,0)) as revenue
                 from public.v_finance_logic
                 where {where_sql}
                   and entry_type='revenue'
@@ -656,7 +656,7 @@ with tab_qa:
             else:
                 label = "Total Revenue"
                 sql = f"""
-                select coalesce(sum(coalesce(revenue_amount,0)),0) as revenue
+                select coalesce(sum(coalesce(gl_amount,0)),0) as revenue
                 from public.v_finance_logic
                 where {where_sql}
                   and entry_type='revenue'
@@ -669,7 +669,7 @@ with tab_qa:
                 sql = f"""
                 select date_trunc('month',"date") as month,
                        head_name,
-                       sum(coalesce(expense_amount,0)) as expense
+                       sum(coalesce(gl_amount,0)) as expense
                 from public.v_finance_logic
                 where {where_sql}
                   and entry_type='expense'
@@ -680,7 +680,7 @@ with tab_qa:
                 label = "Expense by Head"
                 sql = f"""
                 select head_name,
-                       sum(coalesce(expense_amount,0)) as expense
+                       sum(coalesce(gl_amount,0)) as expense
                 from public.v_finance_logic
                 where {where_sql}
                   and entry_type='expense'
@@ -692,7 +692,7 @@ with tab_qa:
                 label = "Monthly Expense"
                 sql = f"""
                 select date_trunc('month',"date") as month,
-                       sum(coalesce(expense_amount,0)) as expense
+                       sum(coalesce(gl_amount,0)) as expense
                 from public.v_finance_logic
                 where {where_sql}
                   and entry_type='expense'
@@ -702,7 +702,7 @@ with tab_qa:
             else:
                 label = "Total Expense"
                 sql = f"""
-                select coalesce(sum(coalesce(expense_amount,0)),0) as expense
+                select coalesce(sum(coalesce(gl_amount,0)),0) as expense
                 from public.v_finance_logic
                 where {where_sql}
                   and entry_type='expense'
