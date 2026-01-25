@@ -116,19 +116,23 @@ def parse_month_range(q: str, default_year: int | None = None):
 def infer_date_sql(q: str):
     """Returns (sql_fragment, params_dict) or (None, {})."""
     ql = q.lower()
+
     if "last month" in ql:
         return (
-            ""date" >= date_trunc('month', current_date) - interval '1 month' "
-            "and "date" < date_trunc('month', current_date)",
+            "\"date\" >= date_trunc('month', current_date) - interval '1 month' "
+            "and \"date\" < date_trunc('month', current_date)",
             {}
         )
+
     if "this month" in ql:
         return (
-            ""date" >= date_trunc('month', current_date) "
-            "and "date" < date_trunc('month', current_date) + interval '1 month'",
+            "\"date\" >= date_trunc('month', current_date) "
+            "and \"date\" < date_trunc('month', current_date) + interval '1 month'",
             {}
         )
+
     return None, {}
+
 
 def extract_payee(q: str):
     ql = q.lower()
