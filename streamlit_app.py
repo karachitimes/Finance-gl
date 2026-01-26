@@ -250,8 +250,15 @@ def run_df(sql: str, params: dict, columns: list[str] | None = None) -> pd.DataF
         df_out.columns = columns
     return df_out
 
+@st.cache_data(ttl=600)
 def compute_powerpivot_metrics(where_sql: str, params: dict, bank_revenue: str = BANK_REVENUE_DEFAULT, bank_assignment: str = BANK_ASSIGNMENT_DEFAULT):
-    """Return KPIs equivalent to your DAX measures, under current UI filter context."""
+    """
+    Return KPIs equivalent to your DAX measures, under current UI filter context.
+
+    This function is cached so that repeated calls with the same SQL filter and parameters
+    do not recompute the same aggregations on every interaction.  A TTL of 600
+    seconds (10 minutes) is used to ensure that the cache stays reasonably fresh.
+    """
 
     total_deposit = run_scalar(
         f"""
@@ -376,24 +383,73 @@ def compute_powerpivot_metrics(where_sql: str, params: dict, bank_revenue: str =
 # -------------------------------------------------
 # UI FILTERS
 # -------------------------------------------------
-with st.container():
+#
+# To reduce unnecessary reruns, wrap all filter controls in a form.  The form will
+# only trigger a rerun when the user clicks the "Apply Filters" button.  Selected
+# filter values are stored in st.session_state so they persist across reruns.
+if "filters_applied" not in st.session_state:
+    # Initialize defaults on first run
+    st.session_state.filters_applied = False
+    st.session_state.df = date(2025, 1, 1)
+    st.session_state.dt = date.today()
+    st.session_state.bank = "ALL"
+    st.session_state.head = "ALL"
+    st.session_state.account = "ALL"
+    st.session_state.attribute = "ALL"
+    st.session_state.func_code = "ALL"
+
+with st.form(key="filter_form"):
     c1, c2 = st.columns(2)
     with c1:
-        df = st.date_input("From Date", value=date(2025, 1, 1))
+        new_df = st.date_input("From Date", value=st.session_state.df)
     with c2:
-        dt = st.date_input("To Date", value=date.today())
+        new_dt = st.date_input("To Date", value=st.session_state.dt)
 
-    bank = st.selectbox("Bank", ["ALL"] + get_distinct("bank"))
-    head = st.selectbox("Head", ["ALL"] + get_distinct("head_name"))
-    account = st.selectbox("Account", ["ALL"] + get_distinct("account"))
-    # New attribute filter
-    # Attempt to fetch distinct values from the 'attribute' column; if it doesn't exist, fallback to empty list
+    # Pre-fetch distinct lists once for index lookups. These functions are cached via @st.cache_data.
+    banks = ["ALL"] + get_distinct("bank")
+    heads = ["ALL"] + get_distinct("head_name")
+    accounts = ["ALL"] + get_distinct("account")
     try:
         attributes = get_distinct("attribute")
     except Exception:
         attributes = []
-    attribute = st.selectbox("Attribute", ["ALL"] + sorted(attributes))
-    func_code = st.selectbox("Function Code", ["ALL"] + get_distinct("func_code"))
+    attrs_list = ["ALL"] + sorted(attributes)
+    funcs = ["ALL"] + get_distinct("func_code")
+
+    # Compute indices for current selections to preserve state on rerun
+    b_idx = banks.index(st.session_state.bank) if st.session_state.bank in banks else 0
+    h_idx = heads.index(st.session_state.head) if st.session_state.head in heads else 0
+    a_idx = accounts.index(st.session_state.account) if st.session_state.account in accounts else 0
+    attr_idx = attrs_list.index(st.session_state.attribute) if st.session_state.attribute in attrs_list else 0
+    f_idx = funcs.index(st.session_state.func_code) if st.session_state.func_code in funcs else 0
+
+    new_bank = st.selectbox("Bank", banks, index=b_idx)
+    new_head = st.selectbox("Head", heads, index=h_idx)
+    new_account = st.selectbox("Account", accounts, index=a_idx)
+    new_attribute = st.selectbox("Attribute", attrs_list, index=attr_idx)
+    new_func_code = st.selectbox("Function Code", funcs, index=f_idx)
+
+    apply_filters = st.form_submit_button("Apply Filters")
+
+if apply_filters or not st.session_state.filters_applied:
+    # Update session state with new values
+    st.session_state.filters_applied = True
+    st.session_state.df = new_df
+    st.session_state.dt = new_dt
+    st.session_state.bank = new_bank
+    st.session_state.head = new_head
+    st.session_state.account = new_account
+    st.session_state.attribute = new_attribute
+    st.session_state.func_code = new_func_code
+
+# Read filter values from session state
+df = st.session_state.df
+dt = st.session_state.dt
+bank = st.session_state.bank
+head = st.session_state.head
+account = st.session_state.account
+attribute = st.session_state.attribute
+func_code = st.session_state.func_code
 
 # -------------------------------------------------
 # TABS
