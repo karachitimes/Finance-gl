@@ -869,14 +869,17 @@ with tab_qa:
         if intent == "revenue":
             if struct["by_head"] and struct["monthly"]:
                 label = "Revenue by Head (Monthly)"
-                # Sum absolute signed_amount divided by 2 to avoid double counting mirrored debit/credit rows.
+                # Sum credit_deposit only (treat AGR/AMC as revenue) and exclude PAR/WAR and recoup transactions
                 sql = f"""
                 select date_trunc('month',"date") as month,
                        head_name,
-                       sum(abs(signed_amount))/2 as revenue
+                       sum(coalesce(credit_deposit,0)) as revenue
                 from public.v_finance_logic
                 where {where_sql}
-                  and entry_type='revenue'
+                  and func_code in ('Revenue','AGR','AMC')
+                  and credit_deposit > 0
+                  and func_code not in ('PAR','WAR')
+                  and coalesce(bill_no,'') not ilike '%recoup%'
                 group by 1,2
                 order by 1,3 desc
                 """
@@ -884,10 +887,13 @@ with tab_qa:
                 label = "Revenue by Head"
                 sql = f"""
                 select head_name,
-                       sum(abs(signed_amount))/2 as revenue
+                       sum(coalesce(credit_deposit,0)) as revenue
                 from public.v_finance_logic
                 where {where_sql}
-                  and entry_type='revenue'
+                  and func_code in ('Revenue','AGR','AMC')
+                  and credit_deposit > 0
+                  and func_code not in ('PAR','WAR')
+                  and coalesce(bill_no,'') not ilike '%recoup%'
                 group by 1
                 order by 2 desc
                 limit 50
@@ -896,10 +902,13 @@ with tab_qa:
                 label = "Revenue by Bank"
                 sql = f"""
                 select coalesce(bank,'UNKNOWN') as bank,
-                       sum(abs(signed_amount))/2 as revenue
+                       sum(coalesce(credit_deposit,0)) as revenue
                 from public.v_finance_logic
                 where {where_sql}
-                  and entry_type='revenue'
+                  and func_code in ('Revenue','AGR','AMC')
+                  and credit_deposit > 0
+                  and func_code not in ('PAR','WAR')
+                  and coalesce(bill_no,'') not ilike '%recoup%'
                 group by 1
                 order by 2 desc
                 """
@@ -907,33 +916,42 @@ with tab_qa:
                 label = "Monthly Revenue"
                 sql = f"""
                 select date_trunc('month',"date") as month,
-                       sum(abs(signed_amount))/2 as revenue
+                       sum(coalesce(credit_deposit,0)) as revenue
                 from public.v_finance_logic
                 where {where_sql}
-                  and entry_type='revenue'
+                  and func_code in ('Revenue','AGR','AMC')
+                  and credit_deposit > 0
+                  and func_code not in ('PAR','WAR')
+                  and coalesce(bill_no,'') not ilike '%recoup%'
                 group by 1
                 order by 1
                 """
             else:
                 label = "Total Revenue"
                 sql = f"""
-                select coalesce(sum(abs(signed_amount))/2,0) as revenue
+                select coalesce(sum(coalesce(credit_deposit,0)),0) as revenue
                 from public.v_finance_logic
                 where {where_sql}
-                  and entry_type='revenue'
+                  and func_code in ('Revenue','AGR','AMC')
+                  and credit_deposit > 0
+                  and func_code not in ('PAR','WAR')
+                  and coalesce(bill_no,'') not ilike '%recoup%'
                 """
 
         # ---------- Expense ----------
         elif intent == "expense":
             if struct["by_head"] and struct["monthly"]:
                 label = "Expense by Head (Monthly)"
+                # Expense is net outflow (signed_amount positive) for non-revenue/non-grant func codes
                 sql = f"""
                 select date_trunc('month',"date") as month,
                        head_name,
-                       sum(coalesce(expense_amount,0)) as expense
+                       sum(signed_amount) as expense
                 from public.v_finance_logic
                 where {where_sql}
-                  and entry_type='expense'
+                  and func_code not in ('Revenue','Loan/Advance','Power','Water')
+                  and signed_amount > 0
+                  and coalesce(bill_no,'') not ilike '%recoup%'
                 group by 1,2
                 order by 1,3 desc
                 """
@@ -941,10 +959,12 @@ with tab_qa:
                 label = "Expense by Head"
                 sql = f"""
                 select head_name,
-                       sum(coalesce(expense_amount,0)) as expense
+                       sum(signed_amount) as expense
                 from public.v_finance_logic
                 where {where_sql}
-                  and entry_type='expense'
+                  and func_code not in ('Revenue','Loan/Advance','Power','Water')
+                  and signed_amount > 0
+                  and coalesce(bill_no,'') not ilike '%recoup%'
                 group by 1
                 order by 2 desc
                 limit 50
@@ -953,20 +973,24 @@ with tab_qa:
                 label = "Monthly Expense"
                 sql = f"""
                 select date_trunc('month',"date") as month,
-                       sum(coalesce(expense_amount,0)) as expense
+                       sum(signed_amount) as expense
                 from public.v_finance_logic
                 where {where_sql}
-                  and entry_type='expense'
+                  and func_code not in ('Revenue','Loan/Advance','Power','Water')
+                  and signed_amount > 0
+                  and coalesce(bill_no,'') not ilike '%recoup%'
                 group by 1
                 order by 1
                 """
             else:
                 label = "Total Expense"
                 sql = f"""
-                select coalesce(sum(coalesce(expense_amount,0)),0) as expense
+                select coalesce(sum(signed_amount),0) as expense
                 from public.v_finance_logic
                 where {where_sql}
-                  and entry_type='expense'
+                  and func_code not in ('Revenue','Loan/Advance','Power','Water')
+                  and signed_amount > 0
+                  and coalesce(bill_no,'') not ilike '%recoup%'
                 """
 
         # ---------- Recoup ----------
