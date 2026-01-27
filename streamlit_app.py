@@ -708,7 +708,7 @@ with tab_receivables:
         select coalesce(sum(coalesce(debit_payment,0)),0)
         from public.v_finance_logic
         where {' and '.join(where_base)}
-          and func_code in :codes
+          and func_code in ('AGR','AMC','Power','Water')
           and coalesce(debit_payment,0) > 0
     """
     # Compute collection (AR collected)
@@ -716,12 +716,12 @@ with tab_receivables:
         select coalesce(sum(coalesce(credit_deposit,0)),0)
         from public.v_finance_logic
         where {' and '.join(where_base)}
-          and func_code in :codes
+          and func_code in ('AGR','AMC','Power','Water')
           and coalesce(credit_deposit,0) > 0
     """
     try:
-        billed = run_scalar(bill_sql, {**params_base, "codes": receivable_codes})
-        collected = run_scalar(collect_sql, {**params_base, "codes": receivable_codes})
+        billed = run_scalar(bill_sql, params_base)
+        collected = run_scalar(collect_sql, params_base)
     except Exception:
         billed = 0
         collected = 0
@@ -751,11 +751,12 @@ with tab_receivables:
           reference_no
         from public.v_finance_logic
         where {' and '.join(where_base)}
-          and func_code in :codes
+          and func_code in ('Revenue','Power','Water')
         order by "date" desc
         limit 1000
     """
-    df_ledger = run_df(ledger_sql, {**params_base, "codes": receivable_codes}, ["Date","Account","Head","Pay To","Description","Debit","Credit","GL Amount","Bill No","Voucher No","Reference No"])
+    # Execute ledger query without passing codes parameter since list is inlined
+    df_ledger = run_df(ledger_sql, params_base, ["Date","Account","Head","Pay To","Description","Debit","Credit","GL Amount","Bill No","Voucher No","Reference No"])
     if df_ledger.empty:
         st.info("No receivable rows under current filters.")
     else:
@@ -876,9 +877,9 @@ with tab_qa:
                        sum(coalesce(credit_deposit,0)) as revenue
                 from public.v_finance_logic
                 where {where_sql}
-                  and func_code in ('Revenue','AGR','AMC')
+                  and func_code in ('Revenue')
                   and credit_deposit > 0
-                  and func_code not in ('PAR','WAR')
+                  and func_code not in ('Power','Water')
                   and coalesce(bill_no,'') not ilike '%recoup%'
                 group by 1,2
                 order by 1,3 desc
@@ -890,9 +891,9 @@ with tab_qa:
                        sum(coalesce(credit_deposit,0)) as revenue
                 from public.v_finance_logic
                 where {where_sql}
-                  and func_code in ('Revenue','AGR','AMC')
+                  and func_code in ('Revenue')
                   and credit_deposit > 0
-                  and func_code not in ('PAR','WAR')
+                  and func_code not in ('Power','Water')
                   and coalesce(bill_no,'') not ilike '%recoup%'
                 group by 1
                 order by 2 desc
@@ -905,9 +906,9 @@ with tab_qa:
                        sum(coalesce(credit_deposit,0)) as revenue
                 from public.v_finance_logic
                 where {where_sql}
-                  and func_code in ('Revenue','AGR','AMC')
+                  and func_code in ('Revenue')
                   and credit_deposit > 0
-                  and func_code not in ('PAR','WAR')
+                  and func_code not in ('Power','Water')
                   and coalesce(bill_no,'') not ilike '%recoup%'
                 group by 1
                 order by 2 desc
@@ -919,9 +920,9 @@ with tab_qa:
                        sum(coalesce(credit_deposit,0)) as revenue
                 from public.v_finance_logic
                 where {where_sql}
-                  and func_code in ('Revenue','AGR','AMC')
+                  and func_code in ('Revenue')
                   and credit_deposit > 0
-                  and func_code not in ('PAR','WAR')
+                  and func_code not in ('Power','Water')
                   and coalesce(bill_no,'') not ilike '%recoup%'
                 group by 1
                 order by 1
@@ -932,9 +933,9 @@ with tab_qa:
                 select coalesce(sum(coalesce(credit_deposit,0)),0) as revenue
                 from public.v_finance_logic
                 where {where_sql}
-                  and func_code in ('Revenue','AGR','AMC')
+                  and func_code in ('Revenue')
                   and credit_deposit > 0
-                  and func_code not in ('PAR','WAR')
+                  and func_code not in ('Power','Water')
                   and coalesce(bill_no,'') not ilike '%recoup%'
                 """
 
