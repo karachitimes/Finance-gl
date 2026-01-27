@@ -301,8 +301,24 @@ def run_scalar(sql: str, params: dict) -> float:
     return float(v or 0)
 
 def run_df(sql: str, params: dict, columns: list[str] | None = None) -> pd.DataFrame:
+    """
+    Execute a SELECT statement and return a DataFrame.  Only the parameters
+    referenced in the SQL statement will be passed to the query.  This prevents
+    SQLAlchemy/psycopg errors due to unused parameters.
+
+    Args:
+        sql: The SQL query string with bound parameter placeholders (e.g., :df).
+        params: A dictionary of all potential parameters.
+        columns: Optional list of column names to apply to the resulting DataFrame.
+
+    Returns:
+        A pandas DataFrame containing the query results.
+    """
+    # Filter params to only those used in the SQL statement
+    param_names = set(re.findall(r':(\w+)', sql))
+    params_exec = {k: v for k, v in params.items() if k in param_names}
     with engine.connect() as conn:
-        rows = conn.execute(text(sql), params).fetchall()
+        rows = conn.execute(text(sql), params_exec).fetchall()
     df_out = pd.DataFrame(rows)
     if columns and not df_out.empty:
         df_out.columns = columns
@@ -887,17 +903,6 @@ with tab_qa:
             params["payee"] = f"%{payee}%"
 
         where_sql = " and ".join(where)
-        # Remove unused date-related parameters if the date filter has been overridden
-        # If the current where_sql does not reference :df or :dt, drop them from params to avoid unused parameter errors.
-        if ":df" not in where_sql:
-            params.pop("df", None)
-        if ":dt" not in where_sql:
-            params.pop("dt", None)
-        # Also remove fiscal year params if they are not referenced
-        if ":fy_start" not in where_sql:
-            params.pop("fy_start", None)
-        if ":fy_end" not in where_sql:
-            params.pop("fy_end", None)
         struct = detect_structure(q)
         ql = q.lower()
 
@@ -1130,9 +1135,15 @@ with tab_qa:
             """
 
         # ---------- Execute + Render ----------
+        # Before executing, filter params to include only keys that appear in the SQL text.
+        # This prevents errors where parameters are supplied but not used in the statement.
+        # Find all parameter names referenced in the SQL using regex.
+        param_names = set(re.findall(r':(\w+)', sql))
+        params_exec = {k: v for k, v in params.items() if k in param_names}
+
         with engine.connect() as conn:
             if "group by" in sql.lower() or intent in ("cashflow", "trial_balance"):
-                rows = conn.execute(text(sql), params).fetchall()
+                rows = conn.execute(text(sql), params_exec).fetchall()
                 if not rows:
                     st.warning("No rows found for this question with current filters.")
                 else:
@@ -1191,7 +1202,7 @@ with tab_qa:
                             st.subheader(label)
                             st.dataframe(df_out, use_container_width=True)
             else:
-                val = conn.execute(text(sql), params).scalar() or 0
+                val = conn.execute(text(sql), params_exec).scalar() or 0
                 st.success(f"{label}: {val:,.0f} PKR")
 
         with st.expander("🔍 Why this result?"):
