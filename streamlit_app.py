@@ -766,59 +766,7 @@ with tab_receivables:
     """
     
 
-# ---------------- Search Description tab ----------------
-with tab_search:
-    st.subheader("Search Transactions by Description")
-    st.caption("Full-text search within the description field. Applies other filters (dates, bank, account, etc.) by default.")
-    search_query = st.text_input("Enter search text", key="search_desc")
-    if search_query:
-        # Build base filter ignoring func_code
-        where_base, params_base, _ = build_where_from_ui(
-            df, dt, bank, head, account, attribute, func_code, fy_label=fy_label, func_override=None
-        )
-        # Compose full-text search condition
-        fts_sql = f"""
-            select
-              "date",
-              account,
-              head_name,
-              pay_to,
-              description,
-              signed_amount as gl_amount,
-              bank,
-              voucher_no,
-              reference_no,
-              bill_no
-            from public.v_finance_logic
-            where {' and '.join(where_base)}
-              and to_tsvector('simple', coalesce(description,'')) @@ plainto_tsquery('simple', :fts_query)
-            order by "date" desc
-            limit 500
-        """
-        # Filter params_base to only those referenced in the FTS SQL
-        fts_param_names = set(re.findall(r':(\w+)', fts_sql))
-        fts_params = {k: v for k, v in params_base.items() if k in fts_param_names}
-        fts_params["fts_query"] = search_query
-        df_search = run_df(
-            fts_sql,
-            fts_params,
-            [
-                "Date",
-                "Account",
-                "Head",
-                "Pay To",
-                "Description",
-                "GL Amount",
-                "Bank",
-                "Voucher No",
-                "Reference No",
-                "Bill No",
-            ],
-        )
-        if df_search.empty:
-            st.info("No matching transactions found.")
-        else:
-            st.dataframe(df_search, use_container_width=True)
+
 # ---------------- AI Q&A tab ----------------
 with tab_qa:
     st.subheader("Ask a Finance Question (Deterministic + Search)")
