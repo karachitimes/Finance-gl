@@ -887,6 +887,17 @@ with tab_qa:
             params["payee"] = f"%{payee}%"
 
         where_sql = " and ".join(where)
+        # Remove unused date-related parameters if the date filter has been overridden
+        # If the current where_sql does not reference :df or :dt, drop them from params to avoid unused parameter errors.
+        if ":df" not in where_sql:
+            params.pop("df", None)
+        if ":dt" not in where_sql:
+            params.pop("dt", None)
+        # Also remove fiscal year params if they are not referenced
+        if ":fy_start" not in where_sql:
+            params.pop("fy_start", None)
+        if ":fy_end" not in where_sql:
+            params.pop("fy_end", None)
         struct = detect_structure(q)
         ql = q.lower()
 
