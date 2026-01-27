@@ -764,30 +764,7 @@ with tab_receivables:
         order by "date" desc
         limit 1000
     """
-    # Execute ledger query. Remove func_code from params to avoid unused parameter errors.
-    ledger_params = params_base.copy()
-    ledger_params.pop("func_code", None)
-    df_ledger = run_df(
-        ledger_sql,
-        ledger_params,
-        [
-            "Date",
-            "Account",
-            "Head",
-            "Pay To",
-            "Description",
-            "Debit",
-            "Credit",
-            "GL Amount",
-            "Bill No",
-            "Voucher No",
-            "Reference No",
-        ],
-    )
-    if df_ledger.empty:
-        st.info("No receivable rows under current filters.")
-    else:
-        st.dataframe(df_ledger, use_container_width=True)
+    
 
 # ---------------- Search Description tab ----------------
 with tab_search:
