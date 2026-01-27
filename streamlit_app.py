@@ -699,24 +699,33 @@ with tab_receivables:
     st.subheader("Receivables (Billing & Collection)")
     # Build base filter ignoring func_code for receivables
     where_base, params_base, _ = build_where_from_ui(
-        df, dt, bank, head, account, attribute, func_code, fy_label=fy_label, func_override=None
+        df,
+        dt,
+        bank,
+        head,
+        account,
+        attribute,
+        func_code,
+        fy_label=fy_label,
+        func_override=None,
     )
+    # Build a safe WHERE clause string; if no conditions, default to 1=1
+    where_clause = ' and '.join(where_base) if where_base else '1=1'
     # Only include receivable func_codes
-    receivable_codes = ("AGR","AMC","PAR","WAR")
     # Compute billing (AR raised)
     bill_sql = f"""
         select coalesce(sum(coalesce(debit_payment,0)),0)
         from public.v_finance_logic
-        where {' and '.join(where_base)}
-          and func_code in ('AGR','AMC','Power','Water')
+        where {where_clause}
+          and func_code in ('AGR','AMC','PAR','WAR')
           and coalesce(debit_payment,0) > 0
     """
     # Compute collection (AR collected)
     collect_sql = f"""
         select coalesce(sum(coalesce(credit_deposit,0)),0)
         from public.v_finance_logic
-        where {' and '.join(where_base)}
-          and func_code in ('AGR','AMC','Power','Water')
+        where {where_clause}
+          and func_code in ('AGR','AMC','PAR','WAR')
           and coalesce(credit_deposit,0) > 0
     """
     try:
@@ -750,13 +759,31 @@ with tab_receivables:
           voucher_no,
           reference_no
         from public.v_finance_logic
-        where {' and '.join(where_base)}
-          and func_code in ('Revenue','Power','Water')
+        where {where_clause}
+          and func_code in ('AGR','AMC','PAR','WAR')
         order by "date" desc
         limit 1000
     """
-    # Execute ledger query without passing codes parameter since list is inlined
-    df_ledger = run_df(ledger_sql, params_base, ["Date","Account","Head","Pay To","Description","Debit","Credit","GL Amount","Bill No","Voucher No","Reference No"])
+    # Execute ledger query. Remove func_code from params to avoid unused parameter errors.
+    ledger_params = params_base.copy()
+    ledger_params.pop("func_code", None)
+    df_ledger = run_df(
+        ledger_sql,
+        ledger_params,
+        [
+            "Date",
+            "Account",
+            "Head",
+            "Pay To",
+            "Description",
+            "Debit",
+            "Credit",
+            "GL Amount",
+            "Bill No",
+            "Voucher No",
+            "Reference No",
+        ],
+    )
     if df_ledger.empty:
         st.info("No receivable rows under current filters.")
     else:
