@@ -867,30 +867,35 @@ with tab_receivables:
     st.divider()
     st.caption("Receivable Ledger (Last 1000 rows)")
 
-    ledger_sql = f"""
-    select
-      "date",
-      account,
-      head_name,
-      pay_to,
-      description,
-      debit_payment,
-      credit_deposit,
-      gl_amount,
-      bill_no,
-      voucher_no,
-      reference_no
-    from {REL_AR}
-    where {where_clause}
-      and func_code in ('AGR','AMC','PAR','WAR')
-    order by "date" desc
-    limit 1000
-    """
-    df_ledger = run_df(
-        ledger_sql, params_base,
-        ["date","account","head_name","pay_to","description","debit_payment","credit_deposit","gl_amount","bill_no","voucher_no","reference_no"]
-    )
-    st.dataframe(df_ledger, use_container_width=True)
+    # Build a schema-safe ledger SELECT list (views may not expose voucher_no/reference_no etc.)
+base_cols = [
+    '"date"', "account", "head_name", "pay_to", "description",
+    "debit_payment", "credit_deposit", "gl_amount", "bill_no"
+]
+optional_cols = ["voucher_no", "reference_no", "status", "bank", "func_code", "attribute", "net_flow"]
+
+select_cols = []
+for c in base_cols:
+    # quoted date already safe
+    if c == '"date"' or has_column(REL_AR, c):
+        select_cols.append(c)
+
+for c in optional_cols:
+    if has_column(REL_AR, c):
+        select_cols.append(c)
+
+ledger_sql = f"""
+select
+  {', '.join(select_cols)}
+from {REL_AR}
+where {where_clause}
+  and func_code in ('AGR','AMC','PAR','WAR')
+order by "date" desc
+limit 1000
+"""
+
+df_ledger = run_df(ledger_sql, params_base)
+st.dataframe(df_ledger, use_container_width=True)
 
 # ---------------- AI Q&A tab ----------------
 with tab_qa:
