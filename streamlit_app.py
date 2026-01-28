@@ -320,7 +320,7 @@ def _not_blank_sql(col: str) -> str:
 def _resolve_relation(sql: str) -> str:
     """Swap legacy relation name to the best available relation."""
     rel = get_source_relation()
-    return sql.replace("public.v_finance_logic", rel)
+    return sql.replace("public.gl_register", rel)
 
 def run_scalar(sql: str, params: dict) -> float:
     sql = _resolve_relation(sql)
@@ -350,7 +350,7 @@ def compute_powerpivot_metrics(where_sql: str, params: dict, bank_revenue: str =
     total_deposit = run_scalar(
         f"""
         select coalesce(sum(coalesce(credit_deposit,0)),0)
-        from public.v_finance_logic
+        from public.gl_register
         where {where_sql}
         """,
         params,
@@ -359,7 +359,7 @@ def compute_powerpivot_metrics(where_sql: str, params: dict, bank_revenue: str =
     pending_recoup_debit = run_scalar(
         f"""
         select coalesce(sum(coalesce(debit_payment,0)),0)
-        from public.v_finance_logic
+        from public.gl_register
         where {where_sql}
           and bill_no ilike '%recoup%'
           and {_is_blank_sql('status')}
@@ -373,7 +373,7 @@ def compute_powerpivot_metrics(where_sql: str, params: dict, bank_revenue: str =
     completed_recoup = run_scalar(
         f"""
         select coalesce(sum(coalesce(debit_payment,0)),0)
-        from public.v_finance_logic
+        from public.gl_register
         where {where_sql}
           and bill_no ilike '%recoup%'
           and {_not_blank_sql('status')}
@@ -388,7 +388,7 @@ def compute_powerpivot_metrics(where_sql: str, params: dict, bank_revenue: str =
           select
             coalesce(sum(coalesce(debit_payment,0)),0) as p_debit,
             coalesce(sum(coalesce(credit_deposit,0)),0) as p_credit
-          from public.v_finance_logic
+          from public.gl_register
           where {where_sql}
             and bill_no ilike '%recoup%'
             and {_is_blank_sql('status')}
@@ -403,7 +403,7 @@ def compute_powerpivot_metrics(where_sql: str, params: dict, bank_revenue: str =
     recoup_amount_revenue_bank = run_scalar(
         f"""
         select coalesce(sum(coalesce(credit_deposit,0)),0)
-        from public.v_finance_logic
+        from public.gl_register
         where {where_sql}
           and bill_no ilike '%recoup%'
           and bank = :bank_revenue
@@ -414,7 +414,7 @@ def compute_powerpivot_metrics(where_sql: str, params: dict, bank_revenue: str =
     revenue_exp_not_recoup = run_scalar(
         f"""
         select coalesce(sum(coalesce(debit_payment,0)),0)
-        from public.v_finance_logic
+        from public.gl_register
         where {where_sql}
           and bill_no ilike '%recoup%'
           and bank = :bank_revenue
@@ -425,7 +425,7 @@ def compute_powerpivot_metrics(where_sql: str, params: dict, bank_revenue: str =
     exp_recoup_from_assignment = run_scalar(
         f"""
         select coalesce(sum(coalesce(debit_payment,0)),0)
-        from public.v_finance_logic
+        from public.gl_register
         where {where_sql}
           and bill_no ilike '%recoup%'
           and bank = :bank_assignment
@@ -436,7 +436,7 @@ def compute_powerpivot_metrics(where_sql: str, params: dict, bank_revenue: str =
     total_expenses_revenue_dr = run_scalar(
         f"""
         select coalesce(sum(coalesce(debit_payment,0)),0)
-        from public.v_finance_logic
+        from public.gl_register
         where {where_sql}
           and head_name = 'Expense'
           and bank = :bank_revenue
@@ -447,7 +447,7 @@ def compute_powerpivot_metrics(where_sql: str, params: dict, bank_revenue: str =
     total_expenses_revenue_cr = run_scalar(
         f"""
         select coalesce(sum(coalesce(credit_deposit,0)),0)
-        from public.v_finance_logic
+        from public.gl_register
         where {where_sql}
           and head_name = 'Expense'
           and bank = :bank_revenue
@@ -570,7 +570,7 @@ with tab_rev:
     sql = f"""
     select date_trunc('month', "date") as month,
            sum(abs(signed_amount))/2 as revenue
-    from public.v_finance_logic
+    from public.gl_register
     where {' and '.join(where)}
       and entry_type = 'revenue'
     group by 1
@@ -596,7 +596,7 @@ with tab_exp:
     sql = f"""
     select date_trunc('month', "date") as month,
            sum(coalesce(expense_amount,0)) as expense
-    from public.v_finance_logic
+    from public.gl_register
     where {' and '.join(where)}
       and entry_type = 'expense'
     group by 1
@@ -623,7 +623,7 @@ with tab_cf:
       coalesce(bank, 'UNKNOWN') as bank,
       direction,
       sum(signed_amount) as amount
-    from public.v_finance_logic
+    from public.gl_register
     where {' and '.join(where)}
     group by 1,2
     order by 1,2
@@ -663,7 +663,7 @@ with tab_tb:
     select
       account,
       sum(signed_amount) as balance
-    from public.v_finance_logic
+    from public.gl_register
     where {' and '.join(where)}
     group by 1
     order by 1
@@ -707,7 +707,7 @@ with tab_rec_kpi:
     pending_by_head_sql = f"""
         select head_name,
                coalesce(sum(coalesce(debit_payment,0) - coalesce(credit_deposit,0)),0) as pending_net
-        from public.v_finance_logic
+        from public.gl_register
         where {where_sql}
           and bill_no ilike '%recoup%'
           and {_is_blank_sql('status')}
@@ -744,7 +744,7 @@ with tab_receivables:
     # Compute billing (AR raised)
     bill_sql = f"""
         select coalesce(sum(coalesce(debit_payment,0)),0)
-        from public.v_finance_logic
+        from public.gl_register
         where {where_clause}
           and func_code in ('AGR','AMC','PAR','WAR')
           and coalesce(debit_payment,0) > 0
@@ -752,7 +752,7 @@ with tab_receivables:
     # Compute collection (AR collected)
     collect_sql = f"""
         select coalesce(sum(coalesce(credit_deposit,0)),0)
-        from public.v_finance_logic
+        from public.gl_register
         where {where_clause}
           and func_code in ('AGR','AMC','PAR','WAR')
           and coalesce(credit_deposit,0) > 0
@@ -787,7 +787,7 @@ with tab_receivables:
           bill_no,
           voucher_no,
           reference_no
-        from public.v_finance_logic
+        from public.gl_register
         where {where_clause}
           and func_code in ('AGR','AMC','PAR','WAR')
         order by "date" desc
@@ -860,7 +860,7 @@ with tab_qa:
                 select date_trunc('month',"date") as month,
                        head_name,
                        sum(coalesce(credit_deposit,0)) as revenue
-                from public.v_finance_logic
+                from public.gl_register
                 where {where_sql}
                   and func_code in ('Revenue')
                   and credit_deposit > 0
@@ -874,7 +874,7 @@ with tab_qa:
                 sql = f"""
                 select head_name,
                        sum(coalesce(credit_deposit,0)) as revenue
-                from public.v_finance_logic
+                from public.gl_register
                 where {where_sql}
                   and func_code in ('Revenue')
                   and credit_deposit > 0
@@ -889,7 +889,7 @@ with tab_qa:
                 sql = f"""
                 select coalesce(bank,'UNKNOWN') as bank,
                        sum(coalesce(credit_deposit,0)) as revenue
-                from public.v_finance_logic
+                from public.gl_register
                 where {where_sql}
                   and func_code in ('Revenue')
                   and credit_deposit > 0
@@ -903,7 +903,7 @@ with tab_qa:
                 sql = f"""
                 select date_trunc('month',"date") as month,
                        sum(coalesce(credit_deposit,0)) as revenue
-                from public.v_finance_logic
+                from public.gl_register
                 where {where_sql}
                   and func_code in ('Revenue')
                   and credit_deposit > 0
@@ -916,7 +916,7 @@ with tab_qa:
                 label = "Total Revenue"
                 sql = f"""
                 select coalesce(sum(coalesce(credit_deposit,0)),0) as revenue
-                from public.v_finance_logic
+                from public.gl_register
                 where {where_sql}
                   and func_code in ('Revenue')
                   and credit_deposit > 0
@@ -933,7 +933,7 @@ with tab_qa:
                 select date_trunc('month',"date") as month,
                        head_name,
                        sum(signed_amount) as expense
-                from public.v_finance_logic
+                from public.gl_register
                 where {where_sql}
                   and func_code not in ('Revenue','Loan/Advance','Power','Water')
                   and signed_amount > 0
@@ -946,7 +946,7 @@ with tab_qa:
                 sql = f"""
                 select head_name,
                        sum(signed_amount) as expense
-                from public.v_finance_logic
+                from public.gl_register
                 where {where_sql}
                   and func_code not in ('Revenue','Loan/Advance','Power','Water')
                   and signed_amount > 0
@@ -960,7 +960,7 @@ with tab_qa:
                 sql = f"""
                 select date_trunc('month',"date") as month,
                        sum(signed_amount) as expense
-                from public.v_finance_logic
+                from public.gl_register
                 where {where_sql}
                   and func_code not in ('Revenue','Loan/Advance','Power','Water')
                   and signed_amount > 0
@@ -972,7 +972,7 @@ with tab_qa:
                 label = "Total Expense"
                 sql = f"""
                 select coalesce(sum(signed_amount),0) as expense
-                from public.v_finance_logic
+                from public.gl_register
                 where {where_sql}
                   and func_code not in ('Revenue','Loan/Advance','Power','Water')
                   and signed_amount > 0
@@ -995,7 +995,7 @@ with tab_qa:
                   select
                     coalesce(sum(coalesce(debit_payment,0)),0) as p_debit,
                     coalesce(sum(coalesce(credit_deposit,0)),0) as p_credit
-                  from public.v_finance_logic
+                  from public.gl_register
                   where {where_sql}
                     and bill_no ilike '%recoup%'
                     and {_is_blank_sql('status')}
@@ -1009,7 +1009,7 @@ with tab_qa:
                 label = "Pending Recoup Amount"
                 sql = f"""
                 select coalesce(sum(coalesce(recoup_pending_amount,0)),0) as pending_recoup
-                from public.v_finance_logic
+                from public.gl_register
                 where {where_sql}
                   and entry_type='recoup'
                   and recoup_state='pending'
@@ -1020,7 +1020,7 @@ with tab_qa:
                 label = "Recouped Total"
                 sql = f"""
                 select coalesce(sum(abs(signed_amount)),0) as recouped_total
-                from public.v_finance_logic
+                from public.gl_register
                 where {where_sql}
                   and entry_type='recoup'
                   and recoup_state='recouped'
@@ -1031,7 +1031,7 @@ with tab_qa:
                 label = "Recoup Total"
                 sql = f"""
                 select coalesce(sum(abs(signed_amount)),0) as recoup_total
-                from public.v_finance_logic
+                from public.gl_register
                 where {where_sql}
                   and entry_type='recoup'
                   and bill_no ilike '%recoup%'
@@ -1044,7 +1044,7 @@ with tab_qa:
             select coalesce(bank,'UNKNOWN') as bank,
                    direction,
                    sum(signed_amount) as amount
-            from public.v_finance_logic
+            from public.gl_register
             where {where_sql}
             group by 1,2
             order by 1,2
@@ -1056,7 +1056,7 @@ with tab_qa:
             sql = f"""
             select account,
                    sum(signed_amount) as balance
-            from public.v_finance_logic
+            from public.gl_register
             where {where_sql}
             group by 1
             order by 1
@@ -1068,7 +1068,7 @@ with tab_qa:
             params["q"] = q
             sql = f"""
             select coalesce(sum(signed_amount),0) as total
-            from public.v_finance_logic
+            from public.gl_register
             where {where_sql}
               and (
                 search_text % :q
