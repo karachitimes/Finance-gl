@@ -677,7 +677,6 @@ with tab_cf:
     """
     df_cf = run_df(sql, params, ["Bank", "Direction", "Amount"])
 
-    # ✅ THIS MUST ALIGN WITH df_cf
     if not df_cf.empty:
         st.dataframe(df_cf, use_container_width=True)
 
@@ -693,38 +692,35 @@ with tab_cf:
     else:
         st.info("No rows found for selected filters/date range.")
 
-
     st.divider()
-st.divider()
-st.caption("Cashflow Cube — Direction × Month (Pivot)")
+    st.caption("Cashflow Cube — Direction × Month (Pivot)")
 
-net_expr = cashflow_net_expr(REL_CF)
-dir_expr = cashflow_dir_expr(REL_CF, net_expr)
+    net_expr = cashflow_net_expr(REL_CF)
+    dir_expr = cashflow_dir_expr(REL_CF, net_expr)
 
-sql_cf_pivot = f"""
-select
-  to_char(date_trunc('month', "date"), 'Mon-YY') as month_label,
-  {dir_expr} as direction,
-  sum(abs({net_expr})) as amount
-from {REL_CF}
-where {where_sql}
-group by 1,2
-order by 1,2
-"""
-df_cf_p = run_df(sql_cf_pivot, params, ["month_label", "direction", "amount"])
+    sql_cf_pivot = f"""
+    select
+      to_char(date_trunc('month', "date"), 'Mon-YY') as month_label,
+      {dir_expr} as direction,
+      sum(abs({net_expr})) as amount
+    from {REL_CF}
+    where {where_sql}
+    group by 1,2
+    order by 1,2
+    """
+    df_cf_p = run_df(sql_cf_pivot, params, ["month_label", "direction", "amount"])
 
-if not df_cf_p.empty:
-    cube = df_cf_p.pivot_table(
-        index="direction",
-        columns="month_label",
-        values="amount",
-        aggfunc="sum",
-        fill_value=0
-    )
-    st.dataframe(cube, use_container_width=True)
-else:
-    st.info("No cashflow rows for pivot under current filters.")
-
+    if not df_cf_p.empty:
+        cube = df_cf_p.pivot_table(
+            index="direction",
+            columns="month_label",
+            values="amount",
+            aggfunc="sum",
+            fill_value=0,
+        )
+        st.dataframe(cube, use_container_width=True)
+    else:
+        st.info("No cashflow rows for pivot under current filters.")
 
 # ---------------- Trial balance tab ----------------
 with tab_tb:
