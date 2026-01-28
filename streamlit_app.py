@@ -661,36 +661,43 @@ with tab_cf:
     )
     where_sql = " and ".join(where) if where else "1=1"
 
+    # Robust cashflow query
+    net_expr = cashflow_net_expr(REL_CF)
+    dir_expr = cashflow_dir_expr(REL_CF, net_expr)
 
-# Robust cashflow query:
-# - Works if REL_CF is v_cashflow (direction/net_flow exist) or a fallback relation.
-net_expr = cashflow_net_expr(REL_CF)
-dir_expr = cashflow_dir_expr(REL_CF, net_expr)
+    sql = f"""
+    select
+      coalesce(bank, 'UNKNOWN') as bank,
+      {dir_expr} as direction,
+      sum({net_expr}) as amount
+    from {REL_CF}
+    where {where_sql}
+    group by 1,2
+    order by 1,2
+    """
+    df_cf = run_df(sql, params, ["Bank", "Direction", "Amount"])
 
-sql = f"""
-select
-  coalesce(bank, 'UNKNOWN') as bank,
-  {dir_expr} as direction,
-  sum({net_expr}) as amount
-from {REL_CF}
-where {where_sql}
-group by 1,2
-order by 1,2
-"""
-df_cf = run_df(sql, params, ["Bank", "Direction", "Amount"])
-
+    # ✅ THIS MUST ALIGN WITH df_cf
     if not df_cf.empty:
         st.dataframe(df_cf, use_container_width=True)
+
         inflow = df_cf[df_cf["Direction"] == "in"]["Amount"].abs().sum()
         outflow = df_cf[df_cf["Direction"] == "out"]["Amount"].abs().sum()
         net = inflow - outflow
-        st.success(f"Inflow: {inflow:,.0f} PKR  |  Outflow: {outflow:,.0f} PKR  |  Net: {net:,.0f} PKR")
+
+        st.success(
+            f"Inflow: {inflow:,.0f} PKR  |  "
+            f"Outflow: {outflow:,.0f} PKR  |  "
+            f"Net: {net:,.0f} PKR"
+        )
     else:
         st.info("No rows found for selected filters/date range.")
 
+
     st.divider()
-    st.caption("Cashflow Cube — Direction × Month (Pivot)")
-    
+st.divider()
+st.caption("Cashflow Cube — Direction × Month (Pivot)")
+
 net_expr = cashflow_net_expr(REL_CF)
 dir_expr = cashflow_dir_expr(REL_CF, net_expr)
 
@@ -706,8 +713,18 @@ order by 1,2
 """
 df_cf_p = run_df(sql_cf_pivot, params, ["month_label", "direction", "amount"])
 
-        cube = df_cf_p.pivot_table(index="direction", columns="month_label", values="amount", aggfunc="sum", fill_value=0)
-        st.dataframe(cube, use_container_width=True)
+if not df_cf_p.empty:
+    cube = df_cf_p.pivot_table(
+        index="direction",
+        columns="month_label",
+        values="amount",
+        aggfunc="sum",
+        fill_value=0
+    )
+    st.dataframe(cube, use_container_width=True)
+else:
+    st.info("No cashflow rows for pivot under current filters.")
+
 
 # ---------------- Trial balance tab ----------------
 with tab_tb:
@@ -891,13 +908,11 @@ with tab_qa:
 
         where_sql = " and ".join(where) if where else "1=1"
 
-        label = ""
-        df_out = pd.DataFrame()
-
         if intent == "revenue":
             rel = REL_REV
+
             if struct["by_head"] and struct["monthly"]:
-                label = "Revenue by Head (Monthly) — Pivot"
+                st.subheader("Revenue by Head (Monthly) — Pivot")
                 sql = f"""
                 select date_trunc('month',"date")::date as month,
                        head_name,
@@ -913,12 +928,12 @@ with tab_qa:
                     pv = df_out.pivot_table(index="Head", columns="Month", values="Revenue", aggfunc="sum", fill_value=0)
                     pv = pv.reindex(sorted(pv.columns), axis=1)
                     pv.columns = [d.strftime("%b-%y") for d in pv.columns]
-                    st.subheader(label)
                     st.dataframe(pv.reset_index().rename(columns={"Head": "Head Name"}), use_container_width=True)
                 else:
                     st.warning("No rows found.")
+
             elif struct["by_head"]:
-                label = "Revenue by Head"
+                st.subheader("Revenue by Head")
                 sql = f"""
                 select head_name,
                        sum(coalesce(credit_deposit,0)) as revenue
@@ -929,9 +944,10 @@ with tab_qa:
                 limit 50
                 """
                 df_out = run_df(sql, params, ["Head", "Revenue"])
-                st.subheader(label); st.dataframe(df_out, use_container_width=True)
+                st.dataframe(df_out, use_container_width=True)
+
             elif struct["monthly"]:
-                label = "Monthly Revenue"
+                st.subheader("Monthly Revenue")
                 sql = f"""
                 select date_trunc('month',"date")::date as month,
                        to_char(date_trunc('month',"date"), 'Mon-YY') as month_label,
@@ -941,21 +957,22 @@ with tab_qa:
                 group by 1,2
                 order by 1
                 """
-                df_out = run_df(sql, params, ["Month", "Month", "Revenue"])
-                st.subheader(label); st.dataframe(df_out, use_container_width=True)
+                df_out = run_df(sql, params, ["Month", "Month Label", "Revenue"])
+                st.dataframe(df_out, use_container_width=True)
+
             else:
-                label = "Total Revenue"
                 sql = f"""
                 select coalesce(sum(coalesce(credit_deposit,0)),0) as revenue
                 from {rel}
                 where {where_sql}
                 """
-                st.success(f"{label}: {run_scalar(sql, params):,.0f} PKR")
+                st.success(f"Total Revenue: {run_scalar(sql, params):,.0f} PKR")
 
         elif intent == "expense":
             rel = REL_EXP
+
             if struct["by_head"] and struct["monthly"]:
-                label = "Expense by Head (Monthly) — Pivot"
+                st.subheader("Expense by Head (Monthly) — Pivot")
                 sql = f"""
                 select date_trunc('month',"date")::date as month,
                        head_name,
@@ -971,12 +988,12 @@ with tab_qa:
                     pv = df_out.pivot_table(index="Head", columns="Month", values="Outflow", aggfunc="sum", fill_value=0)
                     pv = pv.reindex(sorted(pv.columns), axis=1)
                     pv.columns = [d.strftime("%b-%y") for d in pv.columns]
-                    st.subheader(label)
                     st.dataframe(pv.reset_index().rename(columns={"Head": "Head Name"}), use_container_width=True)
                 else:
                     st.warning("No rows found.")
+
             elif struct["by_head"]:
-                label = "Expense by Head"
+                st.subheader("Expense by Head")
                 sql = f"""
                 select head_name,
                        sum(coalesce(net_flow,0)) as outflow
@@ -987,9 +1004,10 @@ with tab_qa:
                 limit 50
                 """
                 df_out = run_df(sql, params, ["Head", "Outflow"])
-                st.subheader(label); st.dataframe(df_out, use_container_width=True)
+                st.dataframe(df_out, use_container_width=True)
+
             elif struct["monthly"]:
-                label = "Monthly Expense"
+                st.subheader("Monthly Expense")
                 sql = f"""
                 select date_trunc('month',"date")::date as month,
                        to_char(date_trunc('month',"date"), 'Mon-YY') as month_label,
@@ -999,41 +1017,40 @@ with tab_qa:
                 group by 1,2
                 order by 1
                 """
-                df_out = run_df(sql, params, ["Month", "Month", "Outflow"])
-                st.subheader(label); st.dataframe(df_out, use_container_width=True)
+                df_out = run_df(sql, params, ["Month", "Month Label", "Outflow"])
+                st.dataframe(df_out, use_container_width=True)
+
             else:
-                label = "Total Expense Outflow"
                 sql = f"""
                 select coalesce(sum(coalesce(net_flow,0)),0) as outflow
                 from {rel}
                 where {where_sql}
                 """
-                st.success(f"{label}: {run_scalar(sql, params):,.0f} PKR")
+                st.success(f"Total Expense Outflow: {run_scalar(sql, params):,.0f} PKR")
 
-        
-elif intent == "cashflow":
-    rel = REL_CF
-    label = "Cashflow by Bank & Direction"
+        elif intent == "cashflow":
+            rel = REL_CF
+            st.subheader("Cashflow by Bank & Direction")
 
-    net_expr = cashflow_net_expr(rel)
-    dir_expr = cashflow_dir_expr(rel, net_expr)
+            net_expr = cashflow_net_expr(rel)
+            dir_expr = cashflow_dir_expr(rel, net_expr)
 
-    sql = f"""
-    select coalesce(bank,'UNKNOWN') as bank,
-           {dir_expr} as direction,
-           sum({net_expr}) as amount
-    from {rel}
-    where {where_sql}
-    group by 1,2
-    order by 1,2
-    """
-    df_out = run_df(sql, params, ["Bank", "Direction", "Amount"])
-    st.subheader(label)
-    st.dataframe(df_out, use_container_width=True)
+            sql = f"""
+            select coalesce(bank,'UNKNOWN') as bank,
+                   {dir_expr} as direction,
+                   sum({net_expr}) as amount
+            from {rel}
+            where {where_sql}
+            group by 1,2
+            order by 1,2
+            """
+            df_out = run_df(sql, params, ["Bank", "Direction", "Amount"])
+            st.dataframe(df_out, use_container_width=True)
 
-elif intent == "trial_balance":
+        elif intent == "trial_balance":
             rel = REL_SEM
-            label = "Trial Balance"
+            st.subheader("Trial Balance")
+
             sql = f"""
             select account,
                    sum(coalesce(gl_amount,0)) as balance
@@ -1043,62 +1060,36 @@ elif intent == "trial_balance":
             order by 1
             """
             df_out = run_df(sql, params, ["Account", "Balance"])
-            st.subheader(label); st.dataframe(df_out, use_container_width=True)
+            st.dataframe(df_out, use_container_width=True)
 
         elif intent == "recoup":
-            # Use recoup views if available; otherwise use semantic relation with bill_no/status logic
-            pending = ("pending" in q.lower()) or ("outstanding" in q.lower()) or ("not recouped" in q.lower())
-            completed = ("completed" in q.lower()) or ("recouped" in q.lower()) or ("settled" in q.lower())
+            rel = REL_SEM
+            st.subheader("Recoup (Pending vs Completed)")
 
-            if pending and relation_exists(REL_RP):
-                rel = REL_RP
-                label = "Pending Recoup (Summary)"
-                sql = f"""
-                select count(*) as rows,
-                       coalesce(sum(coalesce(net_flow,0)),0) as amount
-                from {rel}
-                where {where_sql}
-                """
-                df_out = run_df(sql, params, ["Rows", "Amount"])
-                st.subheader(label); st.dataframe(df_out, use_container_width=True)
-            elif completed and relation_exists(REL_RC):
-                rel = REL_RC
-                label = "Completed Recoup (Summary)"
-                sql = f"""
-                select count(*) as rows,
-                       coalesce(sum(coalesce(net_flow,0)),0) as amount
-                from {rel}
-                where {where_sql}
-                """
-                df_out = run_df(sql, params, ["Rows", "Amount"])
-                st.subheader(label); st.dataframe(df_out, use_container_width=True)
-            else:
-                # fallback formula on semantic view (matches your recoup logic)
-                rel = REL_SEM
-                label = "Recoup (Pending vs Completed) — Fallback"
-                sql = f"""
-                select
-                  case when {_is_blank_sql('status')} then 'pending' else 'completed' end as recoup_state,
-                  coalesce(sum(coalesce(debit_payment,0) - coalesce(credit_deposit,0)),0) as amount
-                from {rel}
-                where {where_sql}
-                  and bill_no ilike '%recoup%'
-                  and coalesce(account,'') <> coalesce(bank,'')
-                group by 1
-                order by 1
-                """
-                df_out = run_df(sql, params, ["State", "Amount"])
-                st.subheader(label); st.dataframe(df_out, use_container_width=True)
+            sql = f"""
+            select
+              case when {_is_blank_sql('status')} then 'pending' else 'completed' end as recoup_state,
+              coalesce(sum(coalesce(debit_payment,0) - coalesce(credit_deposit,0)),0) as amount
+            from {rel}
+            where {where_sql}
+              and bill_no ilike '%recoup%'
+              and coalesce(account,'') <> coalesce(bank,'')
+            group by 1
+            order by 1
+            """
+            df_out = run_df(sql, params, ["State", "Amount"])
+            st.dataframe(df_out, use_container_width=True)
 
         else:
-            # Search (safe): description/pay_to/account/head_name
             rel = REL_SEM
-            label = "Search results (latest rows)"
+            st.subheader("Search results (latest rows)")
+
             term = q.strip()
             params2 = dict(params)
             params2["q"] = f"%{term}%"
             sql = f"""
-            select "date", bank, account, head_name, pay_to, description, debit_payment, credit_deposit, gl_amount, bill_no, status
+            select "date", bank, account, head_name, pay_to, description,
+                   debit_payment, credit_deposit, gl_amount, bill_no, status
             from {rel}
             where {where_sql}
               and (
@@ -1112,14 +1103,16 @@ elif intent == "trial_balance":
             """
             df_out = run_df(
                 sql, params2,
-                ["date","bank","account","head_name","pay_to","description","debit_payment","credit_deposit","gl_amount","bill_no","status"]
+                ["date","bank","account","head_name","pay_to","description",
+                 "debit_payment","credit_deposit","gl_amount","bill_no","status"]
             )
-            st.subheader(label); st.dataframe(df_out, use_container_width=True)
+            st.dataframe(df_out, use_container_width=True)
 
         with st.expander("🔍 Debug (SQL + Params)"):
             st.write(f"Intent: `{intent}` | Effective func filter: `{effective_func}`")
             st.code(where_sql)
             st.json({k: (v.isoformat() if hasattr(v, "isoformat") else v) for k, v in params.items()})
+
 
 # ---------------- Search Description tab ----------------
 with tab_search:
