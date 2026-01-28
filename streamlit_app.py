@@ -61,6 +61,44 @@ def relation_exists(fq: str) -> bool:
         except Exception:
             return False
 
+
+@st.cache_data(ttl=3600)
+def has_column(fq_relation: str, col: str) -> bool:
+    """Check if a relation has a given column using information_schema."""
+    if "." in fq_relation:
+        schema, rel = fq_relation.split(".", 1)
+    else:
+        schema, rel = "public", fq_relation
+
+    sql = text(
+        """
+        select 1
+        from information_schema.columns
+        where table_schema = :schema
+          and table_name = :rel
+          and column_name = :col
+        limit 1
+        """
+    )
+    with engine.connect() as conn:
+        return conn.execute(sql, {"schema": schema, "rel": rel, "col": col}).scalar() is not None
+
+
+def cashflow_net_expr(rel: str) -> str:
+    """Return best available expression representing cash movement for a relation."""
+    if has_column(rel, "net_flow"):
+        return "coalesce(net_flow,0)"
+    if has_column(rel, "gl_amount"):
+        return "coalesce(gl_amount,0)"
+    return "coalesce(debit_payment,0) - coalesce(credit_deposit,0)"
+
+
+def cashflow_dir_expr(rel: str, net_expr: str) -> str:
+    """Return direction column if present; otherwise compute from sign."""
+    if has_column(rel, "direction"):
+        return "direction"
+    return f"case when {net_expr} >= 0 then 'out' else 'in' end"
+
 @st.cache_data(ttl=3600)
 def get_source_relation() -> str:
     """
@@ -623,22 +661,23 @@ with tab_cf:
     )
     where_sql = " and ".join(where) if where else "1=1"
 
-    # Robust cashflow query:
-    # - Works even if the underlying relation does NOT have a 'direction' column.
-    # - Computes net_flow from net_flow if present; otherwise falls back to gl_amount or (debit - credit).
-    net_flow_expr = "coalesce(net_flow, gl_amount, coalesce(debit_payment,0) - coalesce(credit_deposit,0))"
 
-    sql = f"""
-    select
-      coalesce(bank, 'UNKNOWN') as bank,
-      case when {net_flow_expr} >= 0 then 'out' else 'in' end as direction,
-      sum({net_flow_expr}) as amount
-    from {REL_CF}
-    where {where_sql}
-    group by 1,2
-    order by 1,2
-    """
-    df_cf = run_df(sql, params, ["Bank", "Direction", "Amount"])
+# Robust cashflow query:
+# - Works if REL_CF is v_cashflow (direction/net_flow exist) or a fallback relation.
+net_expr = cashflow_net_expr(REL_CF)
+dir_expr = cashflow_dir_expr(REL_CF, net_expr)
+
+sql = f"""
+select
+  coalesce(bank, 'UNKNOWN') as bank,
+  {dir_expr} as direction,
+  sum({net_expr}) as amount
+from {REL_CF}
+where {where_sql}
+group by 1,2
+order by 1,2
+"""
+df_cf = run_df(sql, params, ["Bank", "Direction", "Amount"])
 
     if not df_cf.empty:
         st.dataframe(df_cf, use_container_width=True)
@@ -651,18 +690,22 @@ with tab_cf:
 
     st.divider()
     st.caption("Cashflow Cube — Direction × Month (Pivot)")
-    sql_cf_pivot = f"""
-    select
-      to_char(date_trunc('month', "date"), 'Mon-YY') as month_label,
-      direction,
-      sum(abs(coalesce(net_flow,0))) as amount
-    from {REL_CF}
-    where {where_sql}
-    group by 1,2
-    order by 1,2
-    """
-    df_cf_p = run_df(sql_cf_pivot, params, ["month_label", "direction", "amount"])
-    if not df_cf_p.empty:
+    
+net_expr = cashflow_net_expr(REL_CF)
+dir_expr = cashflow_dir_expr(REL_CF, net_expr)
+
+sql_cf_pivot = f"""
+select
+  to_char(date_trunc('month', "date"), 'Mon-YY') as month_label,
+  {dir_expr} as direction,
+  sum(abs({net_expr})) as amount
+from {REL_CF}
+where {where_sql}
+group by 1,2
+order by 1,2
+"""
+df_cf_p = run_df(sql_cf_pivot, params, ["month_label", "direction", "amount"])
+
         cube = df_cf_p.pivot_table(index="direction", columns="month_label", values="amount", aggfunc="sum", fill_value=0)
         st.dataframe(cube, use_container_width=True)
 
@@ -967,22 +1010,28 @@ with tab_qa:
                 """
                 st.success(f"{label}: {run_scalar(sql, params):,.0f} PKR")
 
-        elif intent == "cashflow":
-            rel = REL_CF
-            label = "Cashflow by Bank & Direction"
-            sql = f"""
-            select coalesce(bank,'UNKNOWN') as bank,
-                   direction,
-                   sum(coalesce(net_flow,0)) as amount
-            from {rel}
-            where {where_sql}
-            group by 1,2
-            order by 1,2
-            """
-            df_out = run_df(sql, params, ["Bank", "Direction", "Amount"])
-            st.subheader(label); st.dataframe(df_out, use_container_width=True)
+        
+elif intent == "cashflow":
+    rel = REL_CF
+    label = "Cashflow by Bank & Direction"
 
-        elif intent == "trial_balance":
+    net_expr = cashflow_net_expr(rel)
+    dir_expr = cashflow_dir_expr(rel, net_expr)
+
+    sql = f"""
+    select coalesce(bank,'UNKNOWN') as bank,
+           {dir_expr} as direction,
+           sum({net_expr}) as amount
+    from {rel}
+    where {where_sql}
+    group by 1,2
+    order by 1,2
+    """
+    df_out = run_df(sql, params, ["Bank", "Direction", "Amount"])
+    st.subheader(label)
+    st.dataframe(df_out, use_container_width=True)
+
+elif intent == "trial_balance":
             rel = REL_SEM
             label = "Trial Balance"
             sql = f"""
