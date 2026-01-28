@@ -53,18 +53,38 @@ except OperationalError as e:
 # -------------------------------------------------
 # HELPERS (DB)
 # -------------------------------------------------
+def relation_exists(fq: str) -> bool:
+    with engine.connect() as conn:
+        try:
+            conn.execute(text(f"select 1 from {fq} limit 1"))
+            return True
+        except Exception:
+            return False
+
 @st.cache_data(ttl=3600)
 def get_source_relation() -> str:
     """
     Return the best available relation for analytics queries.
     Prefer semantic view if it exists; otherwise fall back to raw table.
     """
-    with engine.connect() as conn:
-        try:
-            conn.execute(text("SELECT 1 FROM public.v_finance_semantic LIMIT 1"))
-            return "public.v_finance_semantic"
-        except Exception:
-            return "public.gl_register"
+    if relation_exists("public.v_finance_semantic"):
+        return "public.v_finance_semantic"
+    return "public.gl_register"
+
+def pick_relation(candidates: list[str]) -> str:
+    for c in candidates:
+        if relation_exists(c):
+            return c
+    return candidates[-1]
+
+# Prefer semantic views when available
+REL_SEM = pick_relation(["public.v_finance_semantic", "public.gl_register"])
+REL_REV = pick_relation(["public.v_revenue", REL_SEM])
+REL_EXP = pick_relation(["public.v_expense", REL_SEM])
+REL_CF  = pick_relation(["public.v_cashflow", REL_SEM])
+REL_AR  = pick_relation(["public.v_receivable", REL_SEM])
+REL_RP  = pick_relation(["public.v_recoup_pending", REL_SEM])
+REL_RC  = pick_relation(["public.v_recoup_completed", REL_SEM])
 
 @st.cache_data(ttl=3600)
 def get_distinct(col: str):
@@ -76,8 +96,7 @@ def get_distinct(col: str):
     if col not in allowed:
         raise ValueError(f"Unsupported distinct column: {col}")
 
-    rel = get_source_relation()
-    q = text(f'SELECT DISTINCT {col} FROM {rel} WHERE {col} IS NOT NULL ORDER BY {col}')
+    q = text(f'SELECT DISTINCT {col} FROM {REL_SEM} WHERE {col} IS NOT NULL ORDER BY {col}')
     with engine.connect() as conn:
         return [r[0] for r in conn.execute(q).fetchall()]
 
@@ -91,8 +110,7 @@ KNOWN_FUNC_CODES = get_distinct("func_code")
 @st.cache_data(ttl=3600)
 def get_distinct_years() -> list[int]:
     """Return a list of distinct calendar years from the transaction dates."""
-    rel = get_source_relation()
-    q = text(f'SELECT DISTINCT EXTRACT(YEAR FROM "date")::int AS year FROM {rel} ORDER BY year')
+    q = text(f'SELECT DISTINCT EXTRACT(YEAR FROM "date")::int AS year FROM {REL_SEM} ORDER BY year')
     with engine.connect() as conn:
         return [r[0] for r in conn.execute(q).fetchall()]
 
@@ -150,24 +168,19 @@ def parse_month_range(q: str, default_year: int | None = None):
 def infer_date_sql(q: str):
     """Returns (sql_fragment, params_dict) or (None, {})."""
     ql = q.lower()
-
     if "last month" in ql:
         return (
             "\"date\" >= date_trunc('month', current_date) - interval '1 month' "
             "and \"date\" < date_trunc('month', current_date)",
             {}
         )
-
     if "this month" in ql:
         return (
             "\"date\" >= date_trunc('month', current_date) "
             "and \"date\" < date_trunc('month', current_date) + interval '1 month'",
             {}
         )
-
     return None, {}
-
-
 
 def extract_payee(q: str):
     """
@@ -176,7 +189,6 @@ def extract_payee(q: str):
     Returns None if the extracted name is not a known payee.
     """
     ql = q.lower()
-    # Only match patterns like 'to <payee>' and avoid 'by head', etc.
     m = re.search(r"(?:to)\s+([a-z\s]+?)(?:\s+with|\s+month|\s+for|$)", ql)
     if m:
         return best_payee_match(m.group(1))
@@ -197,8 +209,8 @@ def parse_explicit_func_code(q: str) -> str | None:
 def detect_structure(q: str):
     ql = q.lower()
     return {
-        "by_head": ("by head" in ql) or ("head wise" in ql) or ("head-wise" in ql) or ("head" in ql and "by" in ql),
-        "by_bank": ("by bank" in ql) or ("bank wise" in ql) or ("bank-wise" in ql) or ("bank" in ql and "by" in ql),
+        "by_head": ("by head" in ql) or ("head wise" in ql) or ("head-wise" in ql),
+        "by_bank": ("by bank" in ql) or ("bank wise" in ql) or ("bank-wise" in ql),
         "monthly": ("monthly" in ql) or ("per month" in ql) or ("month wise" in ql) or ("month-wise" in ql) or ("trend" in ql),
         "top": ("top" in ql) or ("highest" in ql) or ("largest" in ql),
     }
@@ -222,30 +234,15 @@ def build_where_from_ui(
 ) -> tuple[list[str], dict, str]:
     """
     Build a list of SQL conditions and a parameters dict based on UI selections.
-
-    Args:
-        df: start date (inclusive)
-        dt: end date (inclusive)
-        bank, head, account, attribute, func_code: selected filter values or "ALL".
-        fy_label: optional fiscal year label like "FY2025-26". If provided and not
-            "ALL", overrides the date range to the fiscal year window (July 1–June 30).
-        func_override: if not USE_UI, overrides any selected func_code. Use None to
-            ignore func_code entirely.
-
-    Returns:
-        where: list of SQL condition strings
-        params: dict of parameters for bound variables
-        effective_func: the func_code actually applied ("ALL" if none)
+    Returns: (where_conditions, params, effective_func_label)
     """
     where = []
     params: dict[str, any] = {}
 
     # Apply date range or fiscal year
     if fy_label and fy_label != "ALL":
-        # Expect format FYYYYY-YY (e.g., FY2025-26). Extract start year.
         try:
             start_year = int(fy_label.replace("FY", "").split("-")[0])
-            # Fiscal year runs from July 1 to June 30 of next year.
             fy_start = date(start_year, 7, 1)
             fy_end = date(start_year + 1, 6, 30)
             where.append('"date" >= :fy_start')
@@ -253,30 +250,23 @@ def build_where_from_ui(
             params["fy_start"] = fy_start
             params["fy_end"] = fy_end
         except Exception:
-            # fall back to explicit df/dt if parsing fails
             where.append('"date" between :df and :dt')
             params["df"] = df
             params["dt"] = dt
     else:
-        # explicit date range
         where.append('"date" between :df and :dt')
         params["df"] = df
         params["dt"] = dt
 
-    # Bank filter
     if bank != "ALL":
         where.append("bank = :bank"); params["bank"] = bank
-    # Head filter
     if head != "ALL":
         where.append("head_name = :head_name"); params["head_name"] = head
-    # Account filter
     if account != "ALL":
         where.append("account = :account"); params["account"] = account
-    # Attribute filter
     if attribute != "ALL":
         where.append("attribute = :attribute"); params["attribute"] = attribute
 
-    # Determine which func_code to use
     if func_override is USE_UI:
         effective_func = func_code if func_code != "ALL" else None
     elif func_override in (None, "ALL"):
@@ -289,68 +279,51 @@ def build_where_from_ui(
 
     return where, params, (effective_func if effective_func is not None else "ALL")
 
-def apply_intent_func_override(intent: str, question: str, ui_func_code: str):
-    """Return USE_UI, None, or a string func_code."""
+def apply_intent_func_override(intent: str, question: str):
     explicit = parse_explicit_func_code(question)
     if explicit:
-        return explicit  # respect explicit request
-
+        return explicit
     if intent == "revenue":
-        return "Revenue"  # force Revenue for revenue intent
+        return "Revenue"
     if intent in ("expense", "recoup", "cashflow", "trial_balance", "search"):
-        return None  # ignore UI func_code filter
+        return None
     return USE_UI
 
 # -------------------------------------------------
-# POWERPIVOT / DAX EQUIVALENT METRICS (SQL)
+# QUERY RUNNERS
 # -------------------------------------------------
-# These mirror the original Excel/PowerPivot measures you shared, but run directly in Postgres.
-
-RECoup_START_DATE = date(2025, 7, 1)
-BANK_REVENUE_DEFAULT = "Revenue:4069284635"
-BANK_ASSIGNMENT_DEFAULT = "Assignment Account 1169255177"
-
-def _is_blank_sql(col: str) -> str:
-    # status can be blank or spaces; treat both as blank
-    return f"NULLIF(BTRIM({col}), '') IS NULL"
-
-def _not_blank_sql(col: str) -> str:
-    return f"NULLIF(BTRIM({col}), '') IS NOT NULL"
-
-def _resolve_relation(sql: str) -> str:
-    """Swap legacy relation name to the best available relation."""
-    rel = get_source_relation()
-    return sql.replace("public.gl_register", rel)
-
 def run_scalar(sql: str, params: dict) -> float:
-    sql = _resolve_relation(sql)
     with engine.connect() as conn:
         v = conn.execute(text(sql), params).scalar()
     return float(v or 0)
 
 def run_df(sql: str, params: dict, columns: list[str] | None = None) -> pd.DataFrame:
-    sql = _resolve_relation(sql)
     with engine.connect() as conn:
         rows = conn.execute(text(sql), params).fetchall()
-    df_out = pd.DataFrame(rows)
-    if columns and not df_out.empty:
-        df_out.columns = columns
-    return df_out
+    out = pd.DataFrame(rows)
+    if columns and not out.empty:
+        out.columns = columns
+    return out
+
+# -------------------------------------------------
+# POWERPIVOT / DAX EQUIVALENT METRICS (SQL)
+# -------------------------------------------------
+RECoup_START_DATE = date(2025, 7, 1)
+BANK_REVENUE_DEFAULT = "Revenue:4069284635"
+BANK_ASSIGNMENT_DEFAULT = "Assignment Account 1169255177"
+
+def _is_blank_sql(col: str) -> str:
+    return f"NULLIF(BTRIM({col}), '') IS NULL"
+
+def _not_blank_sql(col: str) -> str:
+    return f"NULLIF(BTRIM({col}), '') IS NOT NULL"
 
 @st.cache_data(ttl=600)
 def compute_powerpivot_metrics(where_sql: str, params: dict, bank_revenue: str = BANK_REVENUE_DEFAULT, bank_assignment: str = BANK_ASSIGNMENT_DEFAULT):
-    """
-    Return KPIs equivalent to your DAX measures, under current UI filter context.
-
-    This function is cached so that repeated calls with the same SQL filter and parameters
-    do not recompute the same aggregations on every interaction.  A TTL of 600
-    seconds (10 minutes) is used to ensure that the cache stays reasonably fresh.
-    """
-
     total_deposit = run_scalar(
         f"""
         select coalesce(sum(coalesce(credit_deposit,0)),0)
-        from public.gl_register
+        from {REL_SEM}
         where {where_sql}
         """,
         params,
@@ -359,7 +332,7 @@ def compute_powerpivot_metrics(where_sql: str, params: dict, bank_revenue: str =
     pending_recoup_debit = run_scalar(
         f"""
         select coalesce(sum(coalesce(debit_payment,0)),0)
-        from public.gl_register
+        from {REL_SEM}
         where {where_sql}
           and bill_no ilike '%recoup%'
           and {_is_blank_sql('status')}
@@ -373,7 +346,7 @@ def compute_powerpivot_metrics(where_sql: str, params: dict, bank_revenue: str =
     completed_recoup = run_scalar(
         f"""
         select coalesce(sum(coalesce(debit_payment,0)),0)
-        from public.gl_register
+        from {REL_SEM}
         where {where_sql}
           and bill_no ilike '%recoup%'
           and {_not_blank_sql('status')}
@@ -388,7 +361,7 @@ def compute_powerpivot_metrics(where_sql: str, params: dict, bank_revenue: str =
           select
             coalesce(sum(coalesce(debit_payment,0)),0) as p_debit,
             coalesce(sum(coalesce(credit_deposit,0)),0) as p_credit
-          from public.gl_register
+          from {REL_SEM}
           where {where_sql}
             and bill_no ilike '%recoup%'
             and {_is_blank_sql('status')}
@@ -403,18 +376,7 @@ def compute_powerpivot_metrics(where_sql: str, params: dict, bank_revenue: str =
     recoup_amount_revenue_bank = run_scalar(
         f"""
         select coalesce(sum(coalesce(credit_deposit,0)),0)
-        from public.gl_register
-        where {where_sql}
-          and bill_no ilike '%recoup%'
-          and bank = :bank_revenue
-        """,
-        {**params, "bank_revenue": bank_revenue},
-    )
-
-    revenue_exp_not_recoup = run_scalar(
-        f"""
-        select coalesce(sum(coalesce(debit_payment,0)),0)
-        from public.gl_register
+        from {REL_SEM}
         where {where_sql}
           and bill_no ilike '%recoup%'
           and bank = :bank_revenue
@@ -425,34 +387,12 @@ def compute_powerpivot_metrics(where_sql: str, params: dict, bank_revenue: str =
     exp_recoup_from_assignment = run_scalar(
         f"""
         select coalesce(sum(coalesce(debit_payment,0)),0)
-        from public.gl_register
+        from {REL_SEM}
         where {where_sql}
           and bill_no ilike '%recoup%'
           and bank = :bank_assignment
         """,
         {**params, "bank_assignment": bank_assignment},
-    )
-
-    total_expenses_revenue_dr = run_scalar(
-        f"""
-        select coalesce(sum(coalesce(debit_payment,0)),0)
-        from public.gl_register
-        where {where_sql}
-          and head_name = 'Expense'
-          and bank = :bank_revenue
-        """,
-        {**params, "bank_revenue": bank_revenue},
-    )
-
-    total_expenses_revenue_cr = run_scalar(
-        f"""
-        select coalesce(sum(coalesce(credit_deposit,0)),0)
-        from public.gl_register
-        where {where_sql}
-          and head_name = 'Expense'
-          and bank = :bank_revenue
-        """,
-        {**params, "bank_revenue": bank_revenue},
     )
 
     return {
@@ -461,21 +401,13 @@ def compute_powerpivot_metrics(where_sql: str, params: dict, bank_revenue: str =
         "Completed Recoup (Debit)": completed_recoup,
         "Pending Recoup - Deposit": pending_recoup_minus_deposit,
         "Recoup Amount (Revenue Bank Credit)": recoup_amount_revenue_bank,
-        "Revenue Bank Recoup Debit": revenue_exp_not_recoup,
         "Recoup Debit (Assignment Bank)": exp_recoup_from_assignment,
-        "Total Expenses Revenue Dr": total_expenses_revenue_dr,
-        "Total Expenses Revenue Cr": total_expenses_revenue_cr,
     }
 
 # -------------------------------------------------
 # UI FILTERS
 # -------------------------------------------------
-#
-# To reduce unnecessary reruns, wrap all filter controls in a form.  The form will
-# only trigger a rerun when the user clicks the "Apply Filters" button.  Selected
-# filter values are stored in st.session_state so they persist across reruns.
 if "filters_applied" not in st.session_state:
-    # Initialize defaults on first run
     st.session_state.filters_applied = False
     st.session_state.df = date(2025, 1, 1)
     st.session_state.dt = date.today()
@@ -493,7 +425,6 @@ with st.form(key="filter_form"):
     with c2:
         new_dt = st.date_input("To Date", value=st.session_state.dt)
 
-    # Pre-fetch distinct lists once for index lookups. These functions are cached via @st.cache_data.
     banks = ["ALL"] + get_distinct("bank")
     heads = ["ALL"] + get_distinct("head_name")
     accounts = ["ALL"] + get_distinct("account")
@@ -504,7 +435,6 @@ with st.form(key="filter_form"):
     attrs_list = ["ALL"] + sorted(attributes)
     funcs = ["ALL"] + get_distinct("func_code")
 
-    # Compute indices for current selections to preserve state on rerun
     b_idx = banks.index(st.session_state.bank) if st.session_state.bank in banks else 0
     h_idx = heads.index(st.session_state.head) if st.session_state.head in heads else 0
     a_idx = accounts.index(st.session_state.account) if st.session_state.account in accounts else 0
@@ -516,7 +446,7 @@ with st.form(key="filter_form"):
     new_account = st.selectbox("Account", accounts, index=a_idx)
     new_attribute = st.selectbox("Attribute", attrs_list, index=attr_idx)
     new_func_code = st.selectbox("Function Code", funcs, index=f_idx)
-    # Fiscal Year filter: compute options from distinct years
+
     years = get_distinct_years()
     fy_options = ["ALL"] + [f"FY{y}-{(y+1)%100:02d}" for y in years]
     fy_idx = fy_options.index(st.session_state.fy_label) if st.session_state.fy_label in fy_options else 0
@@ -525,7 +455,6 @@ with st.form(key="filter_form"):
     apply_filters = st.form_submit_button("Apply Filters")
 
 if apply_filters or not st.session_state.filters_applied:
-    # Update session state with new values
     st.session_state.filters_applied = True
     st.session_state.df = new_df
     st.session_state.dt = new_dt
@@ -536,7 +465,6 @@ if apply_filters or not st.session_state.filters_applied:
     st.session_state.func_code = new_func_code
     st.session_state.fy_label = new_fy_label
 
-# Read filter values from session state
 df = st.session_state.df
 dt = st.session_state.dt
 bank = st.session_state.bank
@@ -561,119 +489,105 @@ tab_rev, tab_exp, tab_cf, tab_tb, tab_rec_kpi, tab_receivables, tab_qa, tab_sear
         "Search Description",
     ]
 )
+
 # ---------------- Revenue tab ----------------
-    with tabs[0]:   # Revenue tab
-        st.subheader("Revenue Dashboard")
+with tab_rev:
+    st.subheader("Revenue Dashboard (Monthly)")
 
-        where_sql, params = where_builder(
-            date_from=date_from, date_to=date_to,
-            fiscal_year=fiscal_year, bank=bank, account=account, attribute=attribute,
-            func_code=func_code, head_name=head_name, column1=column1,
-            extra_clauses=None
-        )
-
-        sql = f"""
-        select
-        date_trunc('month', "date")::date as month_start,
-        to_char(date_trunc('month', "date"), 'Mon-YY') as month_label,
-        sum(coalesce(credit_deposit,0)) as revenue_amount
-        from {REL_REV}
-        {where_sql}
-        group by 1,2
-        order by 1
-        """
-        df = run_df(sql, params)
-        st.dataframe(df, use_container_width=True)
-
-
-        # -------------------------------------------------
-# Monthly Revenue by Head (Pivot)
-# -------------------------------------------------
-        st.divider()
-        st.caption("Monthly Revenue by Head (Pivot)")
-
-        sql_pivot = f"""
-        select
-        to_char(date_trunc('month', "date"), 'Mon-YY') as month_label,
-        head_name,
-        sum(coalesce(credit_deposit,0)) as revenue_amount
-        from {REL_REV}
-        {where_sql}
-        group by 1,2
-        order by 2,1
-        """
-        df_pivot = run_df(sql_pivot, params)
-
-        if not df_pivot.empty:
-            pivot = df_pivot.pivot_table(
-                index="head_name",        # rows
-                columns="month_label",    # columns
-                values="revenue_amount",  # values
-                aggfunc="sum",
-                fill_value=0
-            )
-            st.dataframe(pivot, use_container_width=True)
-        else:
-            st.info("No revenue data for selected filters.")
-
-       # -------------------------------------------------
-        # Cubes / Semantic Layer Notes (Design Pillars)
-        # -------------------------------------------------
-        st.divider()
-        st.subheader("Finance Semantic Layer (How to read these numbers)")
-        st.markdown("""
-        **Revenue cube**
-        - Rows: **Head Name**
-        - Columns: **Month**
-        - Measure: **credit_deposit** (revenue inflow)
-
-        **Expense cube**
-        - Rows: **Head Name**
-        - Columns: **Month**
-        - Measure: **net_flow** (cash outflow)
-        - Rule: Expense is based on **column1 = 'Expense'**; it is **not removed** just because bill_no = 'Recoup'.
-
-        **Cashflow cube**
-        - Rows: **Direction** (in/out)
-        - Columns: **Month**
-        - Measure: **abs(net_flow)** for in/out; net is **sum(net_flow)**
-
-        **Semantic finance layer**
-        - The app reads from views first: `v_revenue`, `v_expense`, `v_receivable`,
-        `v_recoup_pending`, `v_recoup_completed`, `v_cashflow`, `v_finance_semantic`.
-
-        **Workflow separation (recoup ≠ expense)**
-        - **Recoup** is a settlement/workflow label (`bill_no='Recoup'`)
-        - **Expense** remains expense even if later recouped
-        - Recoup status is reported separately
-        """)
-
-# ---------------- Expense tab ----------------
-with tab_exp:
-    st.subheader("Expenses (Monthly Net Cash Outflow)")
-    where, params, _ = build_where_from_ui(df, dt, bank, head, account, attribute, func_code, fy_label=fy_label, func_override=None)
+    where, params, _ = build_where_from_ui(
+        df, dt, bank, head, account, attribute, func_code,
+        fy_label=fy_label,
+        func_override="Revenue",
+    )
     where_sql = " and ".join(where) if where else "1=1"
 
-    # Prefer semantic expense view (net cash outflow); fallback to semantic/table
-    with engine.connect() as conn:
-        try:
-            conn.execute(text("select 1 from public.v_expense limit 1"))
-            rel_exp = "public.v_expense"
-        except Exception:
-            rel_exp = get_source_relation()
-
-    sql = f"""
-    select date_trunc('month', "date")::date as month,
-           to_char(date_trunc('month', "date"), 'Mon-YY') as month_label,
-           sum(coalesce(net_flow,0)) as expense_outflow
-    from {rel_exp}
+    sql_month = f"""
+    select
+      date_trunc('month', "date")::date as month_start,
+      to_char(date_trunc('month', "date"), 'Mon-YY') as month_label,
+      sum(coalesce(credit_deposit,0)) as revenue_amount
+    from {REL_REV}
     where {where_sql}
     group by 1,2
     order by 1
     """
+    df_rev = run_df(sql_month, params, ["month_start", "month_label", "revenue_amount"])
+    st.dataframe(df_rev, use_container_width=True)
 
+    st.divider()
+    st.caption("Monthly Revenue by Head (Pivot) — Head rows × Month columns")
+
+    sql_pivot = f"""
+    select
+      to_char(date_trunc('month', "date"), 'Mon-YY') as month_label,
+      head_name,
+      sum(coalesce(credit_deposit,0)) as revenue_amount
+    from {REL_REV}
+    where {where_sql}
+    group by 1,2
+    order by 2,1
+    """
+    df_pivot = run_df(sql_pivot, params, ["month_label", "head_name", "revenue_amount"])
+
+    if not df_pivot.empty:
+        cube = df_pivot.pivot_table(
+            index="head_name",
+            columns="month_label",
+            values="revenue_amount",
+            aggfunc="sum",
+            fill_value=0,
+        )
+        st.dataframe(cube, use_container_width=True)
+    else:
+        st.info("No revenue data for selected filters.")
+
+    st.divider()
+    st.subheader("Finance Semantic Layer (How to read these numbers)")
+    st.markdown("""
+**Revenue cube**
+- Rows: **Head Name**
+- Columns: **Month**
+- Measure: **credit_deposit** (revenue inflow)
+- Source: `v_revenue` (fallback: `v_finance_semantic` / `gl_register`)
+
+**Expense cube**
+- Rows: **Head Name**
+- Columns: **Month**
+- Measure: **net_flow** (cash outflow)
+- Rule: Expense is based on **column1 = 'Expense'**; it is **not removed** just because bill_no = 'Recoup'.
+
+**Cashflow cube**
+- Rows: **Bank × Direction**
+- Columns: **Month**
+- Measure: **abs(net_flow)** for in/out; net is **sum(net_flow)**
+
+**Workflow separation (recoup ≠ expense)**
+- **Recoup** is a settlement/workflow label (`bill_no='Recoup'`), tracked separately.
+- **Expense** remains expense even if later recouped; recoup status is reported in recoup views.
+""")
+
+# ---------------- Expense tab ----------------
+with tab_exp:
+    st.subheader("Expenses (Monthly Net Cash Outflow)")
+
+    where, params, _ = build_where_from_ui(
+        df, dt, bank, head, account, attribute, func_code,
+        fy_label=fy_label,
+        func_override=None,
+    )
+    where_sql = " and ".join(where) if where else "1=1"
+
+    sql = f"""
+    select
+      date_trunc('month', "date")::date as month,
+      to_char(date_trunc('month', "date"), 'Mon-YY') as month_label,
+      sum(coalesce(net_flow,0)) as expense_outflow
+    from {REL_EXP}
+    where {where_sql}
+    group by 1,2
+    order by 1
+    """
     df_exp = run_df(sql, params, ["month", "month_label", "expense_outflow"])
-
     if not df_exp.empty:
         st.dataframe(df_exp, use_container_width=True)
         st.line_chart(df_exp.set_index("month_label")["expense_outflow"])
@@ -681,26 +595,40 @@ with tab_exp:
     else:
         st.info("No expense rows found for selected filters/date range.")
 
+    st.divider()
+    st.caption("Expense Cube — Head × Month (Pivot)")
+    sql_exp_pivot = f"""
+    select
+      to_char(date_trunc('month', "date"), 'Mon-YY') as month_label,
+      head_name,
+      sum(coalesce(net_flow,0)) as outflow
+    from {REL_EXP}
+    where {where_sql}
+    group by 1,2
+    order by 2,1
+    """
+    df_exp_p = run_df(sql_exp_pivot, params, ["month_label", "head_name", "outflow"])
+    if not df_exp_p.empty:
+        cube = df_exp_p.pivot_table(index="head_name", columns="month_label", values="outflow", aggfunc="sum", fill_value=0)
+        st.dataframe(cube, use_container_width=True)
+
 # ---------------- Cashflow tab ----------------
 with tab_cf:
     st.subheader("Cashflow Summary (By Bank & Direction)")
-    where, params, _ = build_where_from_ui(df, dt, bank, head, account, attribute, func_code, fy_label=fy_label, func_override=None)
-    where_sql = " and ".join(where) if where else "1=1"
 
-    # Prefer semantic cashflow view; fallback to semantic/table
-    with engine.connect() as conn:
-        try:
-            conn.execute(text("select 1 from public.v_cashflow limit 1"))
-            rel_cf = "public.v_cashflow"
-        except Exception:
-            rel_cf = get_source_relation()
+    where, params, _ = build_where_from_ui(
+        df, dt, bank, head, account, attribute, func_code,
+        fy_label=fy_label,
+        func_override=None,
+    )
+    where_sql = " and ".join(where) if where else "1=1"
 
     sql = f"""
     select
       coalesce(bank, 'UNKNOWN') as bank,
       direction,
       sum(coalesce(net_flow,0)) as amount
-    from {rel_cf}
+    from {REL_CF}
     where {where_sql}
     group by 1,2
     order by 1,2
@@ -709,13 +637,29 @@ with tab_cf:
 
     if not df_cf.empty:
         st.dataframe(df_cf, use_container_width=True)
-
         inflow = df_cf[df_cf["Direction"] == "in"]["Amount"].abs().sum()
         outflow = df_cf[df_cf["Direction"] == "out"]["Amount"].abs().sum()
         net = inflow - outflow
         st.success(f"Inflow: {inflow:,.0f} PKR  |  Outflow: {outflow:,.0f} PKR  |  Net: {net:,.0f} PKR")
     else:
         st.info("No rows found for selected filters/date range.")
+
+    st.divider()
+    st.caption("Cashflow Cube — Direction × Month (Pivot)")
+    sql_cf_pivot = f"""
+    select
+      to_char(date_trunc('month', "date"), 'Mon-YY') as month_label,
+      direction,
+      sum(abs(coalesce(net_flow,0))) as amount
+    from {REL_CF}
+    where {where_sql}
+    group by 1,2
+    order by 1,2
+    """
+    df_cf_p = run_df(sql_cf_pivot, params, ["month_label", "direction", "amount"])
+    if not df_cf_p.empty:
+        cube = df_cf_p.pivot_table(index="direction", columns="month_label", values="amount", aggfunc="sum", fill_value=0)
+        st.dataframe(cube, use_container_width=True)
 
 # ---------------- Trial balance tab ----------------
 with tab_tb:
@@ -736,24 +680,20 @@ with tab_tb:
     sql = f"""
     select
       account,
-      sum(gl_amount) as balance
-    from public.gl_register
+      sum(coalesce(gl_amount,0)) as balance
+    from {REL_SEM}
     where {' and '.join(where)}
     group by 1
     order by 1
     """
-    with engine.connect() as conn:
-        rows = conn.execute(text(sql), params).fetchall()
-
-    if rows:
-        df_tb = pd.DataFrame(rows, columns=["Account", "Balance"])
+    df_tb = run_df(sql, params, ["Account", "Balance"])
+    if not df_tb.empty:
         st.dataframe(df_tb, use_container_width=True)
         st.success(f"Net (sum of balances): {df_tb['Balance'].sum():,.0f} PKR")
     else:
         st.info("No rows found for trial balance with current filters.")
 
-
-# ---------------- Recoup KPIs tab (PowerPivot logic) ----------------
+# ---------------- Recoup KPIs tab ----------------
 with tab_rec_kpi:
     st.subheader("Recoup KPIs (PowerPivot/DAX equivalent)")
 
@@ -763,7 +703,6 @@ with tab_rec_kpi:
     with c1:
         bank_assignment = st.text_input("Assignment Bank (exclude / specific KPIs)", value=BANK_ASSIGNMENT_DEFAULT)
 
-    # Use UI filters but ignore func_code for recoup KPIs by default
     where, params, _ = build_where_from_ui(df, dt, bank, head, account, attribute, func_code, fy_label=fy_label, func_override=None)
     where_sql = " and ".join(where)
 
@@ -779,17 +718,18 @@ with tab_rec_kpi:
     st.caption("Pending Recoup (Net) by Head")
 
     pending_by_head_sql = f"""
-        select head_name,
-               coalesce(sum(coalesce(debit_payment,0) - coalesce(credit_deposit,0)),0) as pending_net
-        from public.gl_register
-        where {where_sql}
-          and bill_no ilike '%recoup%'
-          and {_is_blank_sql('status')}
-          and coalesce(account,'') <> coalesce(bank,'')
-          and "date" >= :recoup_start
-        group by 1
-        order by 2 desc
-        limit 100
+    select
+      head_name,
+      coalesce(sum(coalesce(debit_payment,0) - coalesce(credit_deposit,0)),0) as pending_net
+    from {REL_SEM}
+    where {where_sql}
+      and bill_no ilike '%recoup%'
+      and {_is_blank_sql('status')}
+      and coalesce(account,'') <> coalesce(bank,'')
+      and "date" >= :recoup_start
+    group by 1
+    order by 2 desc
+    limit 100
     """
     df_pending = run_df(pending_by_head_sql, {**params, "recoup_start": RECoup_START_DATE}, ["Head", "Pending Net"])
     if df_pending.empty:
@@ -800,44 +740,33 @@ with tab_rec_kpi:
 # ---------------- Receivables tab ----------------
 with tab_receivables:
     st.subheader("Receivables (Billing & Collection)")
-    # Build base filter ignoring func_code for receivables
+
     where_base, params_base, _ = build_where_from_ui(
-        df,
-        dt,
-        bank,
-        head,
-        account,
-        attribute,
-        func_code,
+        df, dt, bank, head, account, attribute, func_code,
         fy_label=fy_label,
         func_override=None,
     )
-    # Build a safe WHERE clause string; if no conditions, default to 1=1
-    where_clause = ' and '.join(where_base) if where_base else '1=1'
-    # Only include receivable func_codes
-    # Compute billing (AR raised)
+    where_clause = " and ".join(where_base) if where_base else "1=1"
+
     bill_sql = f"""
-        select coalesce(sum(coalesce(debit_payment,0)),0)
-        from public.gl_register
-        where {where_clause}
-          and func_code in ('AGR','AMC','PAR','WAR')
-          and coalesce(debit_payment,0) > 0
+    select coalesce(sum(coalesce(debit_payment,0)),0)
+    from {REL_AR}
+    where {where_clause}
+      and func_code in ('AGR','AMC','PAR','WAR')
+      and coalesce(debit_payment,0) > 0
     """
-    # Compute collection (AR collected)
     collect_sql = f"""
-        select coalesce(sum(coalesce(credit_deposit,0)),0)
-        from public.gl_register
-        where {where_clause}
-          and func_code in ('AGR','AMC','PAR','WAR')
-          and coalesce(credit_deposit,0) > 0
+    select coalesce(sum(coalesce(credit_deposit,0)),0)
+    from {REL_AR}
+    where {where_clause}
+      and func_code in ('AGR','AMC','PAR','WAR')
+      and coalesce(credit_deposit,0) > 0
     """
-    try:
-        billed = run_scalar(bill_sql, params_base)
-        collected = run_scalar(collect_sql, params_base)
-    except Exception:
-        billed = 0
-        collected = 0
+
+    billed = run_scalar(bill_sql, params_base)
+    collected = run_scalar(collect_sql, params_base)
     outstanding = billed - collected
+
     c0, c1, c2 = st.columns(3)
     with c0:
         st.metric("AR Raised (Debit)", f"{billed:,.0f}")
@@ -848,68 +777,62 @@ with tab_receivables:
 
     st.divider()
     st.caption("Receivable Ledger (Last 1000 rows)")
-    ledger_sql = f"""
-        select
-          "date",
-          account,
-          head_name,
-          pay_to,
-          description,
-          debit_payment,
-          credit_deposit,
-          gl_amount,
-          bill_no,
-          voucher_no,
-          reference_no
-        from public.gl_register
-        where {where_clause}
-          and func_code in ('AGR','AMC','PAR','WAR')
-        order by "date" desc
-        limit 1000
-    """
-    
 
+    ledger_sql = f"""
+    select
+      "date",
+      account,
+      head_name,
+      pay_to,
+      description,
+      debit_payment,
+      credit_deposit,
+      gl_amount,
+      bill_no,
+      voucher_no,
+      reference_no
+    from {REL_AR}
+    where {where_clause}
+      and func_code in ('AGR','AMC','PAR','WAR')
+    order by "date" desc
+    limit 1000
+    """
+    df_ledger = run_df(
+        ledger_sql, params_base,
+        ["date","account","head_name","pay_to","description","debit_payment","credit_deposit","gl_amount","bill_no","voucher_no","reference_no"]
+    )
+    st.dataframe(df_ledger, use_container_width=True)
 
 # ---------------- AI Q&A tab ----------------
 with tab_qa:
-    st.subheader("Ask a Finance Question (Deterministic + Search)")
-    st.caption(
-        "Examples: revenue by head | revenue by head monthly | expense by head | monthly revenue trend | pending recoup amount | trial balance"
-    )
+    st.subheader("Ask a Finance Question (Deterministic + Safe)")
+    st.caption("Examples: revenue by head monthly | expense by head | cashflow by bank | pending recoup | trial balance | search vendor name")
 
     q = st.text_input("Ask anything…", placeholder="revenue by head monthly")
 
     if q:
         intent = detect_intent(q)
+        struct = detect_structure(q)
         payee = extract_payee(q)
 
-        # Build WHERE from UI + intent override (SQL-only)
-        func_override = apply_intent_func_override(intent, q, func_code)
-        where, params, effective_func = build_where_from_ui(df, dt, bank, head, account, attribute, func_code, fy_label=fy_label, func_override=func_override)
+        func_override = apply_intent_func_override(intent, q)
+        where, params, effective_func = build_where_from_ui(
+            df, dt, bank, head, account, attribute, func_code,
+            fy_label=fy_label,
+            func_override=func_override,
+        )
 
         # Override date filter if question specifies relative dates
         date_sql, date_params = infer_date_sql(q)
         if date_sql:
-            
-            where = [
-                w for w in where
-                if "between :df and :dt" not in w
-                and '"date" between' not in w
-            ]
+            where = [w for w in where if "between :df and :dt" not in w and '"date" between' not in w]
             where.insert(0, date_sql)
             params.update(date_params)
 
-        # Month-range overrides date filter
+        # Month-range overrides
         m_start, m_end_excl = parse_month_range(q)
         if m_start and m_end_excl:
-            where = [
-                w for w in where
-                if "between :df and :dt" not in w
-                and '"date" between' not in w
-                and '"date" >=' not in w
-                and '"date" <' not in w
-            ]
-
+            where = [w for w in where if "between :df and :dt" not in w and '"date" between' not in w]
             where.insert(0, '"date" >= :m_start and "date" < :m_end')
             params["m_start"] = m_start
             params["m_end"] = m_end_excl
@@ -918,314 +841,266 @@ with tab_qa:
             where.append("pay_to ilike :payee")
             params["payee"] = f"%{payee}%"
 
-        where_sql = " and ".join(where)
-        struct = detect_structure(q)
-        ql = q.lower()
+        where_sql = " and ".join(where) if where else "1=1"
 
         label = ""
-        sql = ""
+        df_out = pd.DataFrame()
 
-        # ---------- Revenue ----------
         if intent == "revenue":
+            rel = REL_REV
             if struct["by_head"] and struct["monthly"]:
-                label = "Revenue by Head (Monthly)"
-                # Sum credit_deposit only (treat AGR/AMC as revenue) and exclude PAR/WAR and recoup transactions
+                label = "Revenue by Head (Monthly) — Pivot"
                 sql = f"""
-                select date_trunc('month',"date") as month,
+                select date_trunc('month',"date")::date as month,
                        head_name,
                        sum(coalesce(credit_deposit,0)) as revenue
-                from public.gl_register
+                from {rel}
                 where {where_sql}
-                  and func_code in ('Revenue')
-                  and credit_deposit > 0
-                  and func_code not in ('Power','Water')
-                  and coalesce(bill_no,'') not ilike '%recoup%'
                 group by 1,2
                 order by 1,3 desc
                 """
+                df_out = run_df(sql, params, ["Month", "Head", "Revenue"])
+                if not df_out.empty:
+                    df_out["Month"] = pd.to_datetime(df_out["Month"])
+                    pv = df_out.pivot_table(index="Head", columns="Month", values="Revenue", aggfunc="sum", fill_value=0)
+                    pv = pv.reindex(sorted(pv.columns), axis=1)
+                    pv.columns = [d.strftime("%b-%y") for d in pv.columns]
+                    st.subheader(label)
+                    st.dataframe(pv.reset_index().rename(columns={"Head": "Head Name"}), use_container_width=True)
+                else:
+                    st.warning("No rows found.")
             elif struct["by_head"]:
                 label = "Revenue by Head"
                 sql = f"""
                 select head_name,
                        sum(coalesce(credit_deposit,0)) as revenue
-                from public.gl_register
+                from {rel}
                 where {where_sql}
-                  and func_code in ('Revenue')
-                  and credit_deposit > 0
-                  and func_code not in ('Power','Water')
-                  and coalesce(bill_no,'') not ilike '%recoup%'
                 group by 1
                 order by 2 desc
                 limit 50
                 """
-            elif struct["by_bank"]:
-                label = "Revenue by Bank"
-                sql = f"""
-                select coalesce(bank,'UNKNOWN') as bank,
-                       sum(coalesce(credit_deposit,0)) as revenue
-                from public.gl_register
-                where {where_sql}
-                  and func_code in ('Revenue')
-                  and credit_deposit > 0
-                  and func_code not in ('Power','Water')
-                  and coalesce(bill_no,'') not ilike '%recoup%'
-                group by 1
-                order by 2 desc
-                """
+                df_out = run_df(sql, params, ["Head", "Revenue"])
+                st.subheader(label); st.dataframe(df_out, use_container_width=True)
             elif struct["monthly"]:
                 label = "Monthly Revenue"
                 sql = f"""
-                select date_trunc('month',"date") as month,
+                select date_trunc('month',"date")::date as month,
+                       to_char(date_trunc('month',"date"), 'Mon-YY') as month_label,
                        sum(coalesce(credit_deposit,0)) as revenue
-                from public.gl_register
+                from {rel}
                 where {where_sql}
-                  and func_code in ('Revenue')
-                  and credit_deposit > 0
-                  and func_code not in ('Power','Water')
-                  and coalesce(bill_no,'') not ilike '%recoup%'
-                group by 1
+                group by 1,2
                 order by 1
                 """
+                df_out = run_df(sql, params, ["Month", "Month", "Revenue"])
+                st.subheader(label); st.dataframe(df_out, use_container_width=True)
             else:
                 label = "Total Revenue"
                 sql = f"""
                 select coalesce(sum(coalesce(credit_deposit,0)),0) as revenue
-                from public.gl_register
+                from {rel}
                 where {where_sql}
-                  and func_code in ('Revenue')
-                  and credit_deposit > 0
-                  and func_code not in ('Power','Water')
-                  and coalesce(bill_no,'') not ilike '%recoup%'
                 """
+                st.success(f"{label}: {run_scalar(sql, params):,.0f} PKR")
 
-        # ---------- Expense ----------
         elif intent == "expense":
+            rel = REL_EXP
             if struct["by_head"] and struct["monthly"]:
-                label = "Expense by Head (Monthly)"
-                # Expense is net outflow (gl_amount positive) for non-revenue/non-grant func codes
+                label = "Expense by Head (Monthly) — Pivot"
                 sql = f"""
-                select date_trunc('month',"date") as month,
+                select date_trunc('month',"date")::date as month,
                        head_name,
-                       sum(gl_amount) as expense
-                from public.gl_register
+                       sum(coalesce(net_flow,0)) as outflow
+                from {rel}
                 where {where_sql}
-                  and func_code not in ('Revenue','Loan/Advance','Power','Water')
-                  and gl_amount > 0
-                  and coalesce(bill_no,'') not ilike '%recoup%'
                 group by 1,2
                 order by 1,3 desc
                 """
+                df_out = run_df(sql, params, ["Month", "Head", "Outflow"])
+                if not df_out.empty:
+                    df_out["Month"] = pd.to_datetime(df_out["Month"])
+                    pv = df_out.pivot_table(index="Head", columns="Month", values="Outflow", aggfunc="sum", fill_value=0)
+                    pv = pv.reindex(sorted(pv.columns), axis=1)
+                    pv.columns = [d.strftime("%b-%y") for d in pv.columns]
+                    st.subheader(label)
+                    st.dataframe(pv.reset_index().rename(columns={"Head": "Head Name"}), use_container_width=True)
+                else:
+                    st.warning("No rows found.")
             elif struct["by_head"]:
                 label = "Expense by Head"
                 sql = f"""
                 select head_name,
-                       sum(gl_amount) as expense
-                from public.gl_register
+                       sum(coalesce(net_flow,0)) as outflow
+                from {rel}
                 where {where_sql}
-                  and func_code not in ('Revenue','Loan/Advance','Power','Water')
-                  and gl_amount > 0
-                  and coalesce(bill_no,'') not ilike '%recoup%'
                 group by 1
                 order by 2 desc
                 limit 50
                 """
+                df_out = run_df(sql, params, ["Head", "Outflow"])
+                st.subheader(label); st.dataframe(df_out, use_container_width=True)
             elif struct["monthly"]:
                 label = "Monthly Expense"
                 sql = f"""
-                select date_trunc('month',"date") as month,
-                       sum(gl_amount) as expense
-                from public.gl_register
+                select date_trunc('month',"date")::date as month,
+                       to_char(date_trunc('month',"date"), 'Mon-YY') as month_label,
+                       sum(coalesce(net_flow,0)) as outflow
+                from {rel}
                 where {where_sql}
-                  and func_code not in ('Revenue','Loan/Advance','Power','Water')
-                  and gl_amount > 0
-                  and coalesce(bill_no,'') not ilike '%recoup%'
-                group by 1
+                group by 1,2
                 order by 1
                 """
+                df_out = run_df(sql, params, ["Month", "Month", "Outflow"])
+                st.subheader(label); st.dataframe(df_out, use_container_width=True)
             else:
-                label = "Total Expense"
+                label = "Total Expense Outflow"
                 sql = f"""
-                select coalesce(sum(gl_amount),0) as expense
-                from public.gl_register
+                select coalesce(sum(coalesce(net_flow,0)),0) as outflow
+                from {rel}
                 where {where_sql}
-                  and func_code not in ('Revenue','Loan/Advance','Power','Water')
-                  and gl_amount > 0
-                  and coalesce(bill_no,'') not ilike '%recoup%'
                 """
+                st.success(f"{label}: {run_scalar(sql, params):,.0f} PKR")
 
-        # ---------- Recoup ----------
-        elif intent == "recoup":
-            pending = ("pending" in ql) or ("outstanding" in ql) or ("not recouped" in ql)
-            recouped = ("recouped" in ql) or ("settled" in ql)
-            pending_minus_deposit = (
-                ("pending recoup - deposit" in ql)
-                or ("pending recoup minus deposit" in ql)
-                or ("recoup - deposit" in ql)
-            )
-            if pending_minus_deposit:
-                label = "Pending Recoup - Deposit"
-                sql = f"""
-                with p as (
-                  select
-                    coalesce(sum(coalesce(debit_payment,0)),0) as p_debit,
-                    coalesce(sum(coalesce(credit_deposit,0)),0) as p_credit
-                  from public.gl_register
-                  where {where_sql}
-                    and bill_no ilike '%recoup%'
-                    and {_is_blank_sql('status')}
-                    and coalesce(account,'') <> coalesce(bank,'')
-                    and "date" >= :recoup_start
-                )
-                select (p_debit - p_credit) as pending_minus_deposit from p
-                """
-                params["recoup_start"] = RECoup_START_DATE
-            elif pending:
-                label = "Pending Recoup Amount"
-                sql = f"""
-                select coalesce(sum(coalesce(recoup_pending_amount,0)),0) as pending_recoup
-                from public.gl_register
-                where {where_sql}
-                  and entry_type='recoup'
-                  and recoup_state='pending'
-                  and bill_no ilike '%recoup%'
-                  and {_is_blank_sql('status')}
-                """
-            elif recouped:
-                label = "Recouped Total"
-                sql = f"""
-                select coalesce(sum(abs(gl_amount)),0) as recouped_total
-                from public.gl_register
-                where {where_sql}
-                  and entry_type='recoup'
-                  and recoup_state='recouped'
-                  and bill_no ilike '%recoup%'
-                  and {_not_blank_sql('status')}
-                """
-            else:
-                label = "Recoup Total"
-                sql = f"""
-                select coalesce(sum(abs(gl_amount)),0) as recoup_total
-                from public.gl_register
-                where {where_sql}
-                  and entry_type='recoup'
-                  and bill_no ilike '%recoup%'
-                """
-
-        # ---------- Cashflow ----------
         elif intent == "cashflow":
-            label = "Cashflow"
+            rel = REL_CF
+            label = "Cashflow by Bank & Direction"
             sql = f"""
             select coalesce(bank,'UNKNOWN') as bank,
                    direction,
-                   sum(gl_amount) as amount
-            from public.gl_register
+                   sum(coalesce(net_flow,0)) as amount
+            from {rel}
             where {where_sql}
             group by 1,2
             order by 1,2
             """
+            df_out = run_df(sql, params, ["Bank", "Direction", "Amount"])
+            st.subheader(label); st.dataframe(df_out, use_container_width=True)
 
-        # ---------- Trial balance ----------
         elif intent == "trial_balance":
+            rel = REL_SEM
             label = "Trial Balance"
             sql = f"""
             select account,
-                   sum(gl_amount) as balance
-            from public.gl_register
+                   sum(coalesce(gl_amount,0)) as balance
+            from {rel}
             where {where_sql}
             group by 1
             order by 1
             """
+            df_out = run_df(sql, params, ["Account", "Balance"])
+            st.subheader(label); st.dataframe(df_out, use_container_width=True)
 
-        # ---------- Search fallback ----------
+        elif intent == "recoup":
+            # Use recoup views if available; otherwise use semantic relation with bill_no/status logic
+            pending = ("pending" in q.lower()) or ("outstanding" in q.lower()) or ("not recouped" in q.lower())
+            completed = ("completed" in q.lower()) or ("recouped" in q.lower()) or ("settled" in q.lower())
+
+            if pending and relation_exists(REL_RP):
+                rel = REL_RP
+                label = "Pending Recoup (Summary)"
+                sql = f"""
+                select count(*) as rows,
+                       coalesce(sum(coalesce(net_flow,0)),0) as amount
+                from {rel}
+                where {where_sql}
+                """
+                df_out = run_df(sql, params, ["Rows", "Amount"])
+                st.subheader(label); st.dataframe(df_out, use_container_width=True)
+            elif completed and relation_exists(REL_RC):
+                rel = REL_RC
+                label = "Completed Recoup (Summary)"
+                sql = f"""
+                select count(*) as rows,
+                       coalesce(sum(coalesce(net_flow,0)),0) as amount
+                from {rel}
+                where {where_sql}
+                """
+                df_out = run_df(sql, params, ["Rows", "Amount"])
+                st.subheader(label); st.dataframe(df_out, use_container_width=True)
+            else:
+                # fallback formula on semantic view (matches your recoup logic)
+                rel = REL_SEM
+                label = "Recoup (Pending vs Completed) — Fallback"
+                sql = f"""
+                select
+                  case when {_is_blank_sql('status')} then 'pending' else 'completed' end as recoup_state,
+                  coalesce(sum(coalesce(debit_payment,0) - coalesce(credit_deposit,0)),0) as amount
+                from {rel}
+                where {where_sql}
+                  and bill_no ilike '%recoup%'
+                  and coalesce(account,'') <> coalesce(bank,'')
+                group by 1
+                order by 1
+                """
+                df_out = run_df(sql, params, ["State", "Amount"])
+                st.subheader(label); st.dataframe(df_out, use_container_width=True)
+
         else:
-            label = "Search matched total"
-            params["q"] = q
+            # Search (safe): description/pay_to/account/head_name
+            rel = REL_SEM
+            label = "Search results (latest rows)"
+            term = q.strip()
+            params2 = dict(params)
+            params2["q"] = f"%{term}%"
             sql = f"""
-            select coalesce(sum(gl_amount),0) as total
-            from public.gl_register
+            select "date", bank, account, head_name, pay_to, description, debit_payment, credit_deposit, gl_amount, bill_no, status
+            from {rel}
             where {where_sql}
               and (
-                search_text % :q
-                or search_tsv @@ plainto_tsquery('simple', :q)
+                coalesce(description,'') ilike :q
+                or coalesce(pay_to,'') ilike :q
+                or coalesce(account,'') ilike :q
+                or coalesce(head_name,'') ilike :q
               )
+            order by "date" desc
+            limit 500
             """
+            df_out = run_df(
+                sql, params2,
+                ["date","bank","account","head_name","pay_to","description","debit_payment","credit_deposit","gl_amount","bill_no","status"]
+            )
+            st.subheader(label); st.dataframe(df_out, use_container_width=True)
 
-        # ---------- Execute + Render ----------
-        with engine.connect() as conn:
-            if "group by" in sql.lower() or intent in ("cashflow", "trial_balance"):
-                rows = conn.execute(text(sql), params).fetchall()
-                if not rows:
-                    st.warning("No rows found for this question with current filters.")
-                else:
-                    df_out = pd.DataFrame(rows)
-
-                    # Set friendly column names when possible
-                    if intent == "cashflow":
-                        df_out.columns = ["Bank", "Direction", "Amount"]
-                        st.dataframe(df_out, use_container_width=True)
-                        inflow = df_out[df_out["Direction"] == "in"]["Amount"].sum()
-                        outflow = df_out[df_out["Direction"] == "out"]["Amount"].sum()
-                        st.success(f"Inflow: {inflow:,.0f} PKR | Outflow: {abs(outflow):,.0f} PKR | Net: {(inflow+outflow):,.0f} PKR")
-                    elif intent == "trial_balance":
-                        df_out.columns = ["Account", "Balance"]
-                        st.dataframe(df_out, use_container_width=True)
-                        st.success(f"Net (sum of balances): {df_out['Balance'].sum():,.0f} PKR")
-                    else:
-                        # special handling for head-by-month reports: pivot months to columns
-                        if "Revenue by Head (Monthly)" in label or "Expense by Head (Monthly)" in label:
-                            # Standardize column names
-                            if "Revenue" in label:
-                                df_out.columns = ["Month", "Head", "Revenue"]
-                                value_col = "Revenue"
-                            else:
-                                df_out.columns = ["Month", "Head", "Expense"]
-                                value_col = "Expense"
-                            # Convert Month to datetime for proper sorting
-                            df_out["Month"] = pd.to_datetime(df_out["Month"])
-                            # Pivot to get months as columns
-                            df_pivot = df_out.pivot(index="Head", columns="Month", values=value_col).fillna(0)
-                            # Sort month columns chronologically
-                            df_pivot = df_pivot.reindex(sorted(df_pivot.columns), axis=1)
-                            # Rename columns to abbreviated month-year format
-                            df_pivot.columns = [dt.strftime('%b-%y') for dt in df_pivot.columns]
-                            # Reset index to turn Head into a column
-                            df_pivot = df_pivot.reset_index().rename(columns={"Head": "Head Name"})
-                            st.subheader(label)
-                            st.dataframe(df_pivot, use_container_width=True)
-                        else:
-                            # heuristic naming for other reports
-                            if label == "Monthly Revenue":
-                                df_out.columns = ["Month", "Revenue"]
-                                st.line_chart(df_out.set_index("Month"))
-                            elif label == "Monthly Expense":
-                                df_out.columns = ["Month", "Expense"]
-                                st.line_chart(df_out.set_index("Month"))
-                            elif label in ("Revenue by Head", "Expense by Head"):
-                                df_out.columns = ["Head", "Amount"]
-                            elif label == "Revenue by Bank":
-                                df_out.columns = ["Bank", "Revenue"]
-                            elif "Revenue by Head (Monthly)" in label:
-                                df_out.columns = ["Month", "Head", "Revenue"]
-                            elif "Expense by Head (Monthly)" in label:
-                                df_out.columns = ["Month", "Head", "Expense"]
-                            # Display table
-                            st.subheader(label)
-                            st.dataframe(df_out, use_container_width=True)
-            else:
-                val = conn.execute(text(sql), params).scalar() or 0
-                st.success(f"{label}: {val:,.0f} PKR")
-
-        with st.expander("🔍 Why this result?"):
-            st.write(f"Intent detected: `{intent}`")
-            st.write(f"Effective function filter: `{effective_func}`")
-            if payee:
-                st.write(f"Payee: `{payee}`")
-            if m_start and m_end_excl:
-                st.write(f"Month range: `{m_start}` to `{m_end_excl}` (end exclusive)")
-            st.write("Filters applied:")
-            st.write(f"- Bank: `{bank}`  |  Head: `{head}`  |  Account: `{account}`  |  Attribute: `{attribute}`  |  Function: `{func_code}`")
-            st.write(f"- From: `{df}`  |  To: `{dt}`")
-            st.write("SQL (debug):")
-            st.code(sql.strip())
-            st.write("Params (debug):")
+        with st.expander("🔍 Debug (SQL + Params)"):
+            st.write(f"Intent: `{intent}` | Effective func filter: `{effective_func}`")
+            st.code(where_sql)
             st.json({k: (v.isoformat() if hasattr(v, "isoformat") else v) for k, v in params.items()})
+
+# ---------------- Search Description tab ----------------
+with tab_search:
+    st.subheader("Search Description / Payee / Head / Account")
+    term = st.text_input("Search text", value="", placeholder="e.g., recoup, salary, AGR, vendor name...")
+    limit = st.slider("Rows", 50, 2000, 300, step=50)
+
+    where, params, _ = build_where_from_ui(
+        df, dt, bank, head, account, attribute, func_code,
+        fy_label=fy_label,
+        func_override=None,
+    )
+    where_sql = " and ".join(where) if where else "1=1"
+
+    if term.strip():
+        params["q"] = f"%{term.strip()}%"
+        sql = f"""
+        select
+          "date", bank, account, attribute, func_code, head_name, pay_to, description,
+          debit_payment, credit_deposit, gl_amount, net_flow,
+          bill_no, status
+        from {REL_SEM}
+        where {where_sql}
+          and (
+            coalesce(description,'') ilike :q
+            or coalesce(pay_to,'') ilike :q
+            or coalesce(account,'') ilike :q
+            or coalesce(head_name,'') ilike :q
+          )
+        order by "date" desc
+        limit {int(limit)}
+        """
+        df_s = run_df(sql, params)
+        if not df_s.empty and "net_flow" in df_s.columns:
+            st.caption(f"Net effect (sum net_flow): {df_s['net_flow'].sum():,.0f}")
+        st.dataframe(df_s, use_container_width=True)
+    else:
+        st.info("Enter a search term to show results.")
