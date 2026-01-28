@@ -566,10 +566,10 @@ with tab_rev:
     st.subheader("Revenue (Monthly)")
     where, params, _ = build_where_from_ui(df, dt, bank, head, account, attribute, func_code, fy_label=fy_label, func_override="Revenue")
 
-    # Use abs(signed_amount)/2 to avoid double‐counting mirrored debit/credit rows.
+    # Use abs(gl_amount)/2 to avoid double‐counting mirrored debit/credit rows.
     sql = f"""
     select date_trunc('month', "date") as month,
-           sum(abs(signed_amount))/2 as revenue
+           sum(abs(gl_amount))/2 as revenue
     from public.gl_register
     where {' and '.join(where)}
       and entry_type = 'revenue'
@@ -622,7 +622,7 @@ with tab_cf:
     select
       coalesce(bank, 'UNKNOWN') as bank,
       direction,
-      sum(signed_amount) as amount
+      sum(gl_amount) as amount
     from public.gl_register
     where {' and '.join(where)}
     group by 1,2
@@ -662,7 +662,7 @@ with tab_tb:
     sql = f"""
     select
       account,
-      sum(signed_amount) as balance
+      sum(gl_amount) as balance
     from public.gl_register
     where {' and '.join(where)}
     group by 1
@@ -783,7 +783,7 @@ with tab_receivables:
           description,
           debit_payment,
           credit_deposit,
-          signed_amount as gl_amount,
+          gl_amount,
           bill_no,
           voucher_no,
           reference_no
@@ -928,15 +928,15 @@ with tab_qa:
         elif intent == "expense":
             if struct["by_head"] and struct["monthly"]:
                 label = "Expense by Head (Monthly)"
-                # Expense is net outflow (signed_amount positive) for non-revenue/non-grant func codes
+                # Expense is net outflow (gl_amount positive) for non-revenue/non-grant func codes
                 sql = f"""
                 select date_trunc('month',"date") as month,
                        head_name,
-                       sum(signed_amount) as expense
+                       sum(gl_amount) as expense
                 from public.gl_register
                 where {where_sql}
                   and func_code not in ('Revenue','Loan/Advance','Power','Water')
-                  and signed_amount > 0
+                  and gl_amount > 0
                   and coalesce(bill_no,'') not ilike '%recoup%'
                 group by 1,2
                 order by 1,3 desc
@@ -945,11 +945,11 @@ with tab_qa:
                 label = "Expense by Head"
                 sql = f"""
                 select head_name,
-                       sum(signed_amount) as expense
+                       sum(gl_amount) as expense
                 from public.gl_register
                 where {where_sql}
                   and func_code not in ('Revenue','Loan/Advance','Power','Water')
-                  and signed_amount > 0
+                  and gl_amount > 0
                   and coalesce(bill_no,'') not ilike '%recoup%'
                 group by 1
                 order by 2 desc
@@ -959,11 +959,11 @@ with tab_qa:
                 label = "Monthly Expense"
                 sql = f"""
                 select date_trunc('month',"date") as month,
-                       sum(signed_amount) as expense
+                       sum(gl_amount) as expense
                 from public.gl_register
                 where {where_sql}
                   and func_code not in ('Revenue','Loan/Advance','Power','Water')
-                  and signed_amount > 0
+                  and gl_amount > 0
                   and coalesce(bill_no,'') not ilike '%recoup%'
                 group by 1
                 order by 1
@@ -971,11 +971,11 @@ with tab_qa:
             else:
                 label = "Total Expense"
                 sql = f"""
-                select coalesce(sum(signed_amount),0) as expense
+                select coalesce(sum(gl_amount),0) as expense
                 from public.gl_register
                 where {where_sql}
                   and func_code not in ('Revenue','Loan/Advance','Power','Water')
-                  and signed_amount > 0
+                  and gl_amount > 0
                   and coalesce(bill_no,'') not ilike '%recoup%'
                 """
 
@@ -1019,7 +1019,7 @@ with tab_qa:
             elif recouped:
                 label = "Recouped Total"
                 sql = f"""
-                select coalesce(sum(abs(signed_amount)),0) as recouped_total
+                select coalesce(sum(abs(gl_amount)),0) as recouped_total
                 from public.gl_register
                 where {where_sql}
                   and entry_type='recoup'
@@ -1030,7 +1030,7 @@ with tab_qa:
             else:
                 label = "Recoup Total"
                 sql = f"""
-                select coalesce(sum(abs(signed_amount)),0) as recoup_total
+                select coalesce(sum(abs(gl_amount)),0) as recoup_total
                 from public.gl_register
                 where {where_sql}
                   and entry_type='recoup'
@@ -1043,7 +1043,7 @@ with tab_qa:
             sql = f"""
             select coalesce(bank,'UNKNOWN') as bank,
                    direction,
-                   sum(signed_amount) as amount
+                   sum(gl_amount) as amount
             from public.gl_register
             where {where_sql}
             group by 1,2
@@ -1055,7 +1055,7 @@ with tab_qa:
             label = "Trial Balance"
             sql = f"""
             select account,
-                   sum(signed_amount) as balance
+                   sum(gl_amount) as balance
             from public.gl_register
             where {where_sql}
             group by 1
@@ -1067,7 +1067,7 @@ with tab_qa:
             label = "Search matched total"
             params["q"] = q
             sql = f"""
-            select coalesce(sum(signed_amount),0) as total
+            select coalesce(sum(gl_amount),0) as total
             from public.gl_register
             where {where_sql}
               and (
