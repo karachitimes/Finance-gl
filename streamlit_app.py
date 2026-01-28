@@ -563,92 +563,98 @@ tab_rev, tab_exp, tab_cf, tab_tb, tab_rec_kpi, tab_receivables, tab_qa, tab_sear
 )
 # ---------------- Revenue tab ----------------
 with tab_rev:
-    st.subheader("Revenue (Monthly)")
-    where, params, _ = build_where_from_ui(df, dt, bank, head, account, attribute, func_code, fy_label=fy_label, func_override="Revenue")
+    st.subheader("Revenue Dashboard (Monthly)")
 
-    # Use abs(gl_amount)/2 to avoid double‐counting mirrored debit/credit rows.
-    sql = f"""
-    select date_trunc('month', "date") as month,
-           sum(abs(gl_amount))/2 as revenue
-    from public.gl_register
-    where {' and '.join(where)}
-      and entry_type = 'revenue'
-    group by 1
+    # Prefer v_revenue if it exists, else fall back to semantic/table
+    with engine.connect() as conn:
+        try:
+            conn.execute(text("select 1 from public.v_revenue limit 1"))
+            rel_rev = "public.v_revenue"
+        except Exception:
+            rel_rev = get_source_relation()  # v_finance_semantic or gl_register
+
+    # Build WHERE from your existing UI filters
+    where, params, _ = build_where_from_ui(
+        df, dt, bank, head, account, attribute, func_code,
+        fy_label=fy_label,
+        func_override=None
+    )
+    where_sql = " and ".join(where) if where else "1=1"
+
+    # Monthly Revenue
+    sql_month = f"""
+    select
+      date_trunc('month', "date")::date as month_start,
+      to_char(date_trunc('month', "date"), 'Mon-YY') as month_label,
+      sum(coalesce(credit_deposit,0)) as revenue_amount
+    from {rel_rev}
+    where {where_sql}
+    group by 1,2
     order by 1
     """
-    with engine.connect() as conn:
-        rows = conn.execute(text(sql), params).fetchall()
+    df_rev = run_df(sql_month, params, ["month_start", "month_label", "revenue_amount"])
+    st.dataframe(df_rev, use_container_width=True)
 
-    if rows:
-        df_rev = pd.DataFrame(rows, columns=["Month", "Revenue"])
-        st.dataframe(df_rev, use_container_width=True)
+    # Pivot: Head Name (rows) x Month (columns)
+    st.divider()
+    st.caption("Monthly Revenue by Head (Pivot)")
 
-        # -------------------------------------------------
-        # Monthly Revenue by Head (Pivot)
-        # -------------------------------------------------
-        st.divider()
-        st.caption("Monthly Revenue by Head (Pivot)")
+    sql_pivot = f"""
+    select
+      to_char(date_trunc('month', "date"), 'Mon-YY') as month_label,
+      head_name,
+      sum(coalesce(credit_deposit,0)) as revenue_amount
+    from {rel_rev}
+    where {where_sql}
+    group by 1,2
+    order by 2,1
+    """
+    df_pivot = run_df(sql_pivot, params, ["month_label", "head_name", "revenue_amount"])
 
-        sql_pivot = f\"\"\"
-        select
-          to_char(date_trunc('month', \"date\"), 'Mon-YY') as month_label,
-          head_name,
-          sum(coalesce(credit_deposit,0)) as revenue_amount
-        from {REL_REV}
-        {where_sql}
-        group by 1,2
-        order by 2,1
-        \"\"\"
-        df_pivot = run_df(sql_pivot, params)
+    if not df_pivot.empty:
+        pivot = df_pivot.pivot_table(
+            index="head_name",
+            columns="month_label",
+            values="revenue_amount",
+            aggfunc="sum",
+            fill_value=0
+        )
+        st.dataframe(pivot, use_container_width=True)
+    else:
+        st.info("No revenue data for selected filters.")
 
-        if not df_pivot.empty:
-            pivot = df_pivot.pivot_table(
-                index="head_name",        # rows
-                columns="month_label",    # columns
-                values="revenue_amount",  # values
-                aggfunc="sum",
-                fill_value=0
-            )
-            st.dataframe(pivot, use_container_width=True)
-        else:
-            st.info("No revenue data for selected filters.")
 
-        # -------------------------------------------------
+       # -------------------------------------------------
         # Cubes / Semantic Layer Notes (Design Pillars)
         # -------------------------------------------------
         st.divider()
         st.subheader("Finance Semantic Layer (How to read these numbers)")
-        st.markdown(
-            \"\"\"
-**Revenue cube**
-- Rows: **Head Name**
-- Columns: **Month**
-- Measure: **credit_deposit** (revenue inflow)
+        st.markdown("""
+        **Revenue cube**
+        - Rows: **Head Name**
+        - Columns: **Month**
+        - Measure: **credit_deposit** (revenue inflow)
 
-**Expense cube**
-- Rows: **Head Name**
-- Columns: **Month**
-- Measure: **net_flow** (cash outflow)
-- Rule: Expense is based on **column1 = 'Expense'**; it is **not removed** just because bill_no = 'Recoup'.
+        **Expense cube**
+        - Rows: **Head Name**
+        - Columns: **Month**
+        - Measure: **net_flow** (cash outflow)
+        - Rule: Expense is based on **column1 = 'Expense'**; it is **not removed** just because bill_no = 'Recoup'.
 
-**Cashflow cube**
-- Rows: **Direction** (in/out)
-- Columns: **Month**
-- Measure: **abs(net_flow)** for in/out; net is **sum(net_flow)**
+        **Cashflow cube**
+        - Rows: **Direction** (in/out)
+        - Columns: **Month**
+        - Measure: **abs(net_flow)** for in/out; net is **sum(net_flow)**
 
-**Semantic finance layer**
-- The app reads from views first: `v_revenue`, `v_expense`, `v_receivable`, `v_recoup_pending`, `v_recoup_completed`, `v_cashflow`, `v_finance_semantic`.
-- Global slicers (date, bank, account, attribute, func code, fiscal year, head, column1) are applied everywhere via the same **where_builder**.
+        **Semantic finance layer**
+        - The app reads from views first: `v_revenue`, `v_expense`, `v_receivable`,
+        `v_recoup_pending`, `v_recoup_completed`, `v_cashflow`, `v_finance_semantic`.
 
-**Workflow separation (recoup ≠ expense)**
-- **Recoup** is a settlement/workflow label (**bill_no='Recoup'**), tracked via pending/completed views.
-- **Expense** remains expense even if it later becomes recouped; recoup status is reported separately.
-            \"\"\"
-        )
-        st.line_chart(df_rev.set_index("Month"))
-        st.success(f"Total Revenue: {df_rev['Revenue'].sum():,.0f} PKR")
-    else:
-        st.info("No revenue rows found for selected filters/date range.")
+        **Workflow separation (recoup ≠ expense)**
+        - **Recoup** is a settlement/workflow label (`bill_no='Recoup'`)
+        - **Expense** remains expense even if later recouped
+        - Recoup status is reported separately
+        """)
 
 # ---------------- Expense tab ----------------
 with tab_exp:
