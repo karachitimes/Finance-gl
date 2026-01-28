@@ -99,6 +99,29 @@ def cashflow_dir_expr(rel: str, net_expr: str) -> str:
         return "direction"
     return f"case when {net_expr} >= 0 then 'out' else 'in' end"
 
+def tb_amount_expr(rel: str) -> str:
+    """Return best available expression for trial balance amounts."""
+    # Preferred: gl_amount (already signed per your ledger)
+    if has_column(rel, "gl_amount"):
+        return "coalesce(gl_amount,0)"
+    # Next: net_flow (signed cash movement)
+    if has_column(rel, "net_flow"):
+        return "coalesce(net_flow,0)"
+    # Last fallback: debit-credit (signed)
+    return "coalesce(debit_payment,0) - coalesce(credit_deposit,0)"
+
+
+def tb_account_expr(rel: str) -> str:
+    """Return best available dimension for trial balance grouping."""
+    if has_column(rel, "account"):
+        return "account"
+    if has_column(rel, "head_name"):
+        return "head_name"
+    if has_column(rel, "bank"):
+        return "bank"
+    return "'UNKNOWN'"
+
+
 @st.cache_data(ttl=3600)
 def get_source_relation() -> str:
     """
@@ -729,19 +752,23 @@ with tab_tb:
     where = ['"date" <= :dt']
     params = {"dt": dt}
 
-    if bank != "ALL":
+    # Optional slicers (only add if columns exist in the chosen relation)
+    if bank != "ALL" and has_column(REL_SEM, "bank"):
         where.append("bank = :bank"); params["bank"] = bank
-    if head != "ALL":
+    if head != "ALL" and has_column(REL_SEM, "head_name"):
         where.append("head_name = :head_name"); params["head_name"] = head
-    if account != "ALL":
+    if account != "ALL" and has_column(REL_SEM, "account"):
         where.append("account = :account"); params["account"] = account
-    if func_code != "ALL":
+    if func_code != "ALL" and has_column(REL_SEM, "func_code"):
         where.append("func_code = :func_code"); params["func_code"] = func_code
+
+    acct_expr = tb_account_expr(REL_SEM)
+    amt_expr = tb_amount_expr(REL_SEM)
 
     sql = f"""
     select
-      account,
-      sum(coalesce(gl_amount,0)) as balance
+      {acct_expr} as account_key,
+      sum({amt_expr}) as balance
     from {REL_SEM}
     where {' and '.join(where)}
     group by 1
@@ -753,6 +780,7 @@ with tab_tb:
         st.success(f"Net (sum of balances): {df_tb['Balance'].sum():,.0f} PKR")
     else:
         st.info("No rows found for trial balance with current filters.")
+
 
 # ---------------- Recoup KPIs tab ----------------
 with tab_rec_kpi:
@@ -890,7 +918,7 @@ with tab_qa:
             where.insert(0, date_sql)
             params.update(date_params)
 
-        # Month-range overrides
+        # Month-range overrides (e.g., "July to January")
         m_start, m_end_excl = parse_month_range(q)
         if m_start and m_end_excl:
             where = [w for w in where if "between :df and :dt" not in w and '"date" between' not in w]
@@ -904,6 +932,7 @@ with tab_qa:
 
         where_sql = " and ".join(where) if where else "1=1"
 
+        # ---------------- intent routing ----------------
         if intent == "revenue":
             rel = REL_REV
 
@@ -937,7 +966,7 @@ with tab_qa:
                 where {where_sql}
                 group by 1
                 order by 2 desc
-                limit 50
+                limit 100
                 """
                 df_out = run_df(sql, params, ["Head", "Revenue"])
                 st.dataframe(df_out, use_container_width=True)
@@ -997,7 +1026,7 @@ with tab_qa:
                 where {where_sql}
                 group by 1
                 order by 2 desc
-                limit 50
+                limit 100
                 """
                 df_out = run_df(sql, params, ["Head", "Outflow"])
                 st.dataframe(df_out, use_container_width=True)
@@ -1047,9 +1076,12 @@ with tab_qa:
             rel = REL_SEM
             st.subheader("Trial Balance")
 
+            acct_expr = tb_account_expr(rel)
+            amt_expr = tb_amount_expr(rel)
+
             sql = f"""
-            select account,
-                   sum(coalesce(gl_amount,0)) as balance
+            select {acct_expr} as account_key,
+                   sum({amt_expr}) as balance
             from {rel}
             where {where_sql}
             group by 1
