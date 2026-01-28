@@ -562,67 +562,59 @@ tab_rev, tab_exp, tab_cf, tab_tb, tab_rec_kpi, tab_receivables, tab_qa, tab_sear
     ]
 )
 # ---------------- Revenue tab ----------------
-with tab_rev:
-    st.subheader("Revenue Dashboard (Monthly)")
+    with tabs[0]:   # Revenue tab
+        st.subheader("Revenue Dashboard")
 
-    # Prefer v_revenue if it exists, else fall back to semantic/table
-    with engine.connect() as conn:
-        try:
-            conn.execute(text("select 1 from public.v_revenue limit 1"))
-            rel_rev = "public.v_revenue"
-        except Exception:
-            rel_rev = get_source_relation()  # v_finance_semantic or gl_register
-
-    # Build WHERE from your existing UI filters
-    where, params, _ = build_where_from_ui(
-        df, dt, bank, head, account, attribute, func_code,
-        fy_label=fy_label,
-        func_override=None
-    )
-    where_sql = " and ".join(where) if where else "1=1"
-
-    # Monthly Revenue
-    sql_month = f"""
-    select
-      date_trunc('month', "date")::date as month_start,
-      to_char(date_trunc('month', "date"), 'Mon-YY') as month_label,
-      sum(coalesce(credit_deposit,0)) as revenue_amount
-    from {rel_rev}
-    where {where_sql}
-    group by 1,2
-    order by 1
-    """
-    df_rev = run_df(sql_month, params, ["month_start", "month_label", "revenue_amount"])
-    st.dataframe(df_rev, use_container_width=True)
-
-    # Pivot: Head Name (rows) x Month (columns)
-    st.divider()
-    st.caption("Monthly Revenue by Head (Pivot)")
-
-    sql_pivot = f"""
-    select
-      to_char(date_trunc('month', "date"), 'Mon-YY') as month_label,
-      head_name,
-      sum(coalesce(credit_deposit,0)) as revenue_amount
-    from {rel_rev}
-    where {where_sql}
-    group by 1,2
-    order by 2,1
-    """
-    df_pivot = run_df(sql_pivot, params, ["month_label", "head_name", "revenue_amount"])
-
-    if not df_pivot.empty:
-        pivot = df_pivot.pivot_table(
-            index="head_name",
-            columns="month_label",
-            values="revenue_amount",
-            aggfunc="sum",
-            fill_value=0
+        where_sql, params = where_builder(
+            date_from=date_from, date_to=date_to,
+            fiscal_year=fiscal_year, bank=bank, account=account, attribute=attribute,
+            func_code=func_code, head_name=head_name, column1=column1,
+            extra_clauses=None
         )
-        st.dataframe(pivot, use_container_width=True)
-    else:
-        st.info("No revenue data for selected filters.")
 
+        sql = f"""
+        select
+        date_trunc('month', "date")::date as month_start,
+        to_char(date_trunc('month', "date"), 'Mon-YY') as month_label,
+        sum(coalesce(credit_deposit,0)) as revenue_amount
+        from {REL_REV}
+        {where_sql}
+        group by 1,2
+        order by 1
+        """
+        df = run_df(sql, params)
+        st.dataframe(df, use_container_width=True)
+
+
+        # -------------------------------------------------
+# Monthly Revenue by Head (Pivot)
+# -------------------------------------------------
+        st.divider()
+        st.caption("Monthly Revenue by Head (Pivot)")
+
+        sql_pivot = f"""
+        select
+        to_char(date_trunc('month', "date"), 'Mon-YY') as month_label,
+        head_name,
+        sum(coalesce(credit_deposit,0)) as revenue_amount
+        from {REL_REV}
+        {where_sql}
+        group by 1,2
+        order by 2,1
+        """
+        df_pivot = run_df(sql_pivot, params)
+
+        if not df_pivot.empty:
+            pivot = df_pivot.pivot_table(
+                index="head_name",        # rows
+                columns="month_label",    # columns
+                values="revenue_amount",  # values
+                aggfunc="sum",
+                fill_value=0
+            )
+            st.dataframe(pivot, use_container_width=True)
+        else:
+            st.info("No revenue data for selected filters.")
 
        # -------------------------------------------------
         # Cubes / Semantic Layer Notes (Design Pillars)
@@ -658,27 +650,34 @@ with tab_rev:
 
 # ---------------- Expense tab ----------------
 with tab_exp:
-    st.subheader("Expenses (Monthly)")
+    st.subheader("Expenses (Monthly Net Cash Outflow)")
     where, params, _ = build_where_from_ui(df, dt, bank, head, account, attribute, func_code, fy_label=fy_label, func_override=None)
+    where_sql = " and ".join(where) if where else "1=1"
 
-    # Sum expense_amount; expense transactions typically aren't duplicated the same way as revenue, so no division by 2.
+    # Prefer semantic expense view (net cash outflow); fallback to semantic/table
+    with engine.connect() as conn:
+        try:
+            conn.execute(text("select 1 from public.v_expense limit 1"))
+            rel_exp = "public.v_expense"
+        except Exception:
+            rel_exp = get_source_relation()
+
     sql = f"""
-    select date_trunc('month', "date") as month,
-           sum(coalesce(expense_amount,0)) as expense
-    from public.gl_register
-    where {' and '.join(where)}
-      and entry_type = 'expense'
-    group by 1
+    select date_trunc('month', "date")::date as month,
+           to_char(date_trunc('month', "date"), 'Mon-YY') as month_label,
+           sum(coalesce(net_flow,0)) as expense_outflow
+    from {rel_exp}
+    where {where_sql}
+    group by 1,2
     order by 1
     """
-    with engine.connect() as conn:
-        rows = conn.execute(text(sql), params).fetchall()
 
-    if rows:
-        df_exp = pd.DataFrame(rows, columns=["Month", "Expense"])
+    df_exp = run_df(sql, params, ["month", "month_label", "expense_outflow"])
+
+    if not df_exp.empty:
         st.dataframe(df_exp, use_container_width=True)
-        st.line_chart(df_exp.set_index("Month"))
-        st.success(f"Total Expense: {df_exp['Expense'].sum():,.0f} PKR")
+        st.line_chart(df_exp.set_index("month_label")["expense_outflow"])
+        st.success(f"Total Expense Outflow: {df_exp['expense_outflow'].sum():,.0f} PKR")
     else:
         st.info("No expense rows found for selected filters/date range.")
 
@@ -686,29 +685,35 @@ with tab_exp:
 with tab_cf:
     st.subheader("Cashflow Summary (By Bank & Direction)")
     where, params, _ = build_where_from_ui(df, dt, bank, head, account, attribute, func_code, fy_label=fy_label, func_override=None)
+    where_sql = " and ".join(where) if where else "1=1"
+
+    # Prefer semantic cashflow view; fallback to semantic/table
+    with engine.connect() as conn:
+        try:
+            conn.execute(text("select 1 from public.v_cashflow limit 1"))
+            rel_cf = "public.v_cashflow"
+        except Exception:
+            rel_cf = get_source_relation()
 
     sql = f"""
     select
       coalesce(bank, 'UNKNOWN') as bank,
       direction,
-      sum(gl_amount) as amount
-    from public.gl_register
-    where {' and '.join(where)}
+      sum(coalesce(net_flow,0)) as amount
+    from {rel_cf}
+    where {where_sql}
     group by 1,2
     order by 1,2
     """
-    with engine.connect() as conn:
-        rows = conn.execute(text(sql), params).fetchall()
+    df_cf = run_df(sql, params, ["Bank", "Direction", "Amount"])
 
-    if rows:
-        df_cf = pd.DataFrame(rows, columns=["Bank", "Direction", "Amount"])
+    if not df_cf.empty:
         st.dataframe(df_cf, use_container_width=True)
 
-        inflow = df_cf[df_cf["Direction"] == "in"]["Amount"].sum()
-        outflow = df_cf[df_cf["Direction"] == "out"]["Amount"].sum()  # likely negative
-        st.success(
-            f"Inflow: {inflow:,.0f} PKR  |  Outflow: {abs(outflow):,.0f} PKR  |  Net: {(inflow+outflow):,.0f} PKR"
-        )
+        inflow = df_cf[df_cf["Direction"] == "in"]["Amount"].abs().sum()
+        outflow = df_cf[df_cf["Direction"] == "out"]["Amount"].abs().sum()
+        net = inflow - outflow
+        st.success(f"Inflow: {inflow:,.0f} PKR  |  Outflow: {outflow:,.0f} PKR  |  Net: {net:,.0f} PKR")
     else:
         st.info("No rows found for selected filters/date range.")
 
