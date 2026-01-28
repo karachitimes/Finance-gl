@@ -623,11 +623,16 @@ with tab_cf:
     )
     where_sql = " and ".join(where) if where else "1=1"
 
+    # Robust cashflow query:
+    # - Works even if the underlying relation does NOT have a 'direction' column.
+    # - Computes net_flow from net_flow if present; otherwise falls back to gl_amount or (debit - credit).
+    net_flow_expr = "coalesce(net_flow, gl_amount, coalesce(debit_payment,0) - coalesce(credit_deposit,0))"
+
     sql = f"""
     select
       coalesce(bank, 'UNKNOWN') as bank,
-      direction,
-      sum(coalesce(net_flow,0)) as amount
+      case when {net_flow_expr} >= 0 then 'out' else 'in' end as direction,
+      sum({net_flow_expr}) as amount
     from {REL_CF}
     where {where_sql}
     group by 1,2
