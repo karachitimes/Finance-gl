@@ -109,6 +109,26 @@ def get_source_relation() -> str:
         return "public.v_finance_semantic"
     return "public.gl_register"
 
+def tb_amount_expr(rel: str) -> str:
+    """Best available amount expression for trial balance."""
+    if has_column(rel, "gl_amount"):
+        return "coalesce(gl_amount,0)"
+    if has_column(rel, "net_flow"):
+        return "coalesce(net_flow,0)"
+    return "coalesce(debit_payment,0) - coalesce(credit_deposit,0)"
+
+
+def tb_account_expr(rel: str) -> str:
+    """Best available grouping key for trial balance."""
+    if has_column(rel, "account"):
+        return "account"
+    if has_column(rel, "head_name"):
+        return "head_name"
+    if has_column(rel, "bank"):
+        return "bank"
+    return "'UNKNOWN'"
+
+
 def pick_relation(candidates: list[str]) -> str:
     for c in candidates:
         if relation_exists(c):
@@ -729,30 +749,40 @@ with tab_tb:
     where = ['"date" <= :dt']
     params = {"dt": dt}
 
-    if bank != "ALL":
+    if bank != "ALL" and has_column(REL_SEM, "bank"):
         where.append("bank = :bank"); params["bank"] = bank
-    if head != "ALL":
+    if head != "ALL" and has_column(REL_SEM, "head_name"):
         where.append("head_name = :head_name"); params["head_name"] = head
-    if account != "ALL":
+    if account != "ALL" and has_column(REL_SEM, "account"):
         where.append("account = :account"); params["account"] = account
-    if func_code != "ALL":
+    if func_code != "ALL" and has_column(REL_SEM, "func_code"):
         where.append("func_code = :func_code"); params["func_code"] = func_code
+    if attribute != "ALL" and has_column(REL_SEM, "attribute"):
+        where.append("attribute = :attribute"); params["attribute"] = attribute
+
+    acct_expr = tb_account_expr(REL_SEM)
+    amt_expr = tb_amount_expr(REL_SEM)
 
     sql = f"""
     select
-      account,
-      sum(coalesce(gl_amount,0)) as balance
+      {acct_expr} as "Account",
+      sum({amt_expr}) as "Balance"
     from {REL_SEM}
     where {' and '.join(where)}
     group by 1
     order by 1
     """
-    df_tb = run_df(sql, params, ["Account", "Balance"])
+    df_tb = run_df(sql, params)
     if not df_tb.empty:
-        st.dataframe(df_tb, use_container_width=True)
-        st.success(f"Net (sum of balances): {df_tb['Balance'].sum():,.0f} PKR")
+        # Prefer totals-aware renderer if present
+        if "show_df" in globals():
+            show_df(df_tb, label_col="Account")
+        else:
+            st.dataframe(df_tb, use_container_width=True)
+            st.success(f"Net (sum of balances): {df_tb['Balance'].sum():,.0f} PKR")
     else:
         st.info("No rows found for trial balance with current filters.")
+
 
 # ---------------- Recoup KPIs tab ----------------
 with tab_rec_kpi:
@@ -858,11 +888,12 @@ with tab_receivables:
     order by "date" desc
     limit 1000
     """
-    df_ledger = run_df(
-        ledger_sql, params_base,
-        ["date","account","head_name","pay_to","description","debit_payment","credit_deposit","gl_amount","bill_no","voucher_no","reference_no"]
-    )
+    df_ledger = run_df(ledger_sql, params_base)
+if "show_df" in globals():
+    show_df(df_ledger)
+else:
     st.dataframe(df_ledger, use_container_width=True)
+
 
 # ---------------- AI Q&A tab ----------------
 with tab_qa:
@@ -1044,21 +1075,27 @@ with tab_qa:
             st.dataframe(df_out, use_container_width=True)
 
         elif intent == "trial_balance":
-            rel = REL_SEM
-            st.subheader("Trial Balance")
+    rel = REL_SEM
+    st.subheader("Trial Balance")
 
-            sql = f"""
-            select account,
-                   sum(coalesce(gl_amount,0)) as balance
-            from {rel}
-            where {where_sql}
-            group by 1
-            order by 1
-            """
-            df_out = run_df(sql, params, ["Account", "Balance"])
-            st.dataframe(df_out, use_container_width=True)
+    acct_expr = tb_account_expr(rel)
+    amt_expr = tb_amount_expr(rel)
 
-        elif intent == "recoup":
+    sql = f"""
+    select {acct_expr} as "Account",
+           sum({amt_expr}) as "Balance"
+    from {rel}
+    where {where_sql}
+    group by 1
+    order by 1
+    """
+    df_out = run_df(sql, params)
+    if "show_df" in globals():
+        show_df(df_out, label_col="Account")
+    else:
+        st.dataframe(df_out, use_container_width=True)
+
+elif intent == "recoup":
             rel = REL_SEM
             st.subheader("Recoup (Pending vs Completed)")
 
@@ -1123,45 +1160,45 @@ with tab_search:
     )
     where_sql = " and ".join(where) if where else "1=1"
 
-if term.strip():
-    params["q"] = f"%{term.strip()}%"
+    if term.strip():
+        params["q"] = f"%{term.strip()}%"
 
-    # Schema-safe select list (REL_SEM may be a view without all columns)
-    base_cols = ['"date"', "bank", "account", "head_name", "pay_to", "description"]
-    optional_cols = ["attribute", "func_code", "debit_payment", "credit_deposit", "gl_amount", "net_flow", "bill_no", "status"]
+        # Schema-safe select list (REL_SEM may be a view without all columns)
+        base_cols = ['"date"', "bank", "account", "head_name", "pay_to", "description"]
+        optional_cols = ["attribute", "func_code", "debit_payment", "credit_deposit", "gl_amount", "net_flow", "bill_no", "status"]
 
-    select_cols = []
-    for c in base_cols:
-        if c == '"date"' or has_column(REL_SEM, c):
-            select_cols.append(c)
-    for c in optional_cols:
-        if has_column(REL_SEM, c):
-            select_cols.append(c)
-    if not select_cols:
-        select_cols = ['"date"', "description"]
+        select_cols = []
+        for c in base_cols:
+            if c == '"date"' or has_column(REL_SEM, c):
+                select_cols.append(c)
+        for c in optional_cols:
+            if has_column(REL_SEM, c):
+                select_cols.append(c)
+        if not select_cols:
+            select_cols = ['"date"', "description"]
 
-    sql = f"""
-    select {', '.join(select_cols)}
-    from {REL_SEM}
-    where {where_sql}
-      and (
-        coalesce(description,'') ilike :q
-        or coalesce(pay_to,'') ilike :q
-        or coalesce(account,'') ilike :q
-        or coalesce(head_name,'') ilike :q
-      )
-    order by "date" desc
-    limit {int(limit)}
-    """
-    df_s = run_df(sql, params)
+        sql = f"""
+        select {', '.join(select_cols)}
+        from {REL_SEM}
+        where {where_sql}
+          and (
+            coalesce(description,'') ilike :q
+            or coalesce(pay_to,'') ilike :q
+            or coalesce(account,'') ilike :q
+            or coalesce(head_name,'') ilike :q
+          )
+        order by "date" desc
+        limit {int(limit)}
+        """
+        df_s = run_df(sql, params)
 
-    # Net effect caption (if available)
-    if not df_s.empty:
-        if "net_flow" in df_s.columns:
-            st.caption(f"Net effect (sum net_flow): {df_s['net_flow'].sum():,.0f}")
-        elif "gl_amount" in df_s.columns:
-            st.caption(f"Net effect (sum gl_amount): {df_s['gl_amount'].sum():,.0f}")
+        # Net effect caption (if available)
+        if not df_s.empty:
+            if "net_flow" in df_s.columns:
+                st.caption(f"Net effect (sum net_flow): {df_s['net_flow'].sum():,.0f}")
+            elif "gl_amount" in df_s.columns:
+                st.caption(f"Net effect (sum gl_amount): {df_s['gl_amount'].sum():,.0f}")
 
-    show_df(df_s)
-else:
-    st.info("Enter a search term to show results.")
+        show_df(df_s)
+    else:
+        st.info("Enter a search term to show results.")
