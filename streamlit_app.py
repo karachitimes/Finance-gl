@@ -1088,86 +1088,86 @@ with tab_qa:
             st.dataframe(df_out, use_container_width=True)
 
         elif intent == "trial_balance":
-    rel = REL_SEM
-    st.subheader("Trial Balance")
-
-    acct_expr = tb_account_expr(rel)
-    amt_expr = tb_amount_expr(rel)
-
-    sql = f"""
-    select {acct_expr} as "Account",
-           sum({amt_expr}) as "Balance"
-    from {rel}
-    where {where_sql}
-    group by 1
-    order by 1
-    """
-    df_out = run_df(sql, params)
-    if "show_df" in globals():
-        show_df(df_out, label_col="Account")
-    else:
-        st.dataframe(df_out, use_container_width=True)
-
-elif intent == "recoup":
             rel = REL_SEM
-            st.subheader("Recoup (Pending vs Completed)")
+            st.subheader("Trial Balance")
+
+            acct_expr = tb_account_expr(rel)
+            amt_expr = tb_amount_expr(rel)
 
             sql = f"""
-            select
-              case when {_is_blank_sql('status')} then 'pending' else 'completed' end as recoup_state,
-              coalesce(sum(coalesce(debit_payment,0) - coalesce(credit_deposit,0)),0) as amount
+            select {acct_expr} as "Account",
+                sum({amt_expr}) as "Balance"
             from {rel}
             where {where_sql}
-              and bill_no ilike '%recoup%'
-              and coalesce(account,'') <> coalesce(bank,'')
             group by 1
             order by 1
             """
-            df_out = run_df(sql, params, ["State", "Amount"])
-            st.dataframe(df_out, use_container_width=True)
+            df_out = run_df(sql, params)
+            if "show_df" in globals():
+                show_df(df_out, label_col="Account")
+            else:
+                st.dataframe(df_out, use_container_width=True)
 
-else:
-    rel = REL_SEM
-    st.subheader("Search results (latest rows)")
+    elif intent == "recoup":
+                rel = REL_SEM
+                st.subheader("Recoup (Pending vs Completed)")
 
-    term = q.strip()
-    params2 = dict(params)
-    params2["q"] = f"%{term}%"
+                sql = f"""
+                select
+                case when {_is_blank_sql('status')} then 'pending' else 'completed' end as recoup_state,
+                coalesce(sum(coalesce(debit_payment,0) - coalesce(credit_deposit,0)),0) as amount
+                from {rel}
+                where {where_sql}
+                and bill_no ilike '%recoup%'
+                and coalesce(account,'') <> coalesce(bank,'')
+                group by 1
+                order by 1
+                """
+                df_out = run_df(sql, params, ["State", "Amount"])
+                st.dataframe(df_out, use_container_width=True)
 
-    base_cols = ['"date"', "bank", "account", "head_name", "pay_to", "description"]
-    optional_cols = ["debit_payment", "credit_deposit", "gl_amount", "net_flow", "bill_no", "status",
-                     "voucher_no", "reference_no", "func_code", "attribute"]
+    else:
+        rel = REL_SEM
+        st.subheader("Search results (latest rows)")
 
-    select_cols = []
-    for c in base_cols:
-        if c == '"date"' or has_column(rel, c):
-            select_cols.append(c)
-    for c in optional_cols:
-        if has_column(rel, c):
-            select_cols.append(c)
-    if not select_cols:
-        select_cols = ['"date"', "description"]
+        term = q.strip()
+        params2 = dict(params)
+        params2["q"] = f"%{term}%"
 
-    sql = f"""
-    select {', '.join(select_cols)}
-    from {rel}
-    where {where_sql}
-      and (
-        coalesce(description,'') ilike :q
-        or coalesce(pay_to,'') ilike :q
-        or coalesce(account,'') ilike :q
-        or coalesce(head_name,'') ilike :q
-      )
-    order by "date" desc
-    limit 500
-    """
-    df_out = run_df(sql, params2)
-    st.dataframe(df_out, use_container_width=True)
+        base_cols = ['"date"', "bank", "account", "head_name", "pay_to", "description"]
+        optional_cols = ["debit_payment", "credit_deposit", "gl_amount", "net_flow", "bill_no", "status",
+                        "voucher_no", "reference_no", "func_code", "attribute"]
 
-with st.expander("🔍 Debug (SQL + Params)"):
-            st.write(f"Intent: `{intent}` | Effective func filter: `{effective_func}`")
-            st.code(where_sql)
-            st.json({k: (v.isoformat() if hasattr(v, "isoformat") else v) for k, v in params.items()})
+        select_cols = []
+        for c in base_cols:
+            if c == '"date"' or has_column(rel, c):
+                select_cols.append(c)
+        for c in optional_cols:
+            if has_column(rel, c):
+                select_cols.append(c)
+        if not select_cols:
+            select_cols = ['"date"', "description"]
+
+        sql = f"""
+        select {', '.join(select_cols)}
+        from {rel}
+        where {where_sql}
+        and (
+            coalesce(description,'') ilike :q
+            or coalesce(pay_to,'') ilike :q
+            or coalesce(account,'') ilike :q
+            or coalesce(head_name,'') ilike :q
+        )
+        order by "date" desc
+        limit 500
+        """
+        df_out = run_df(sql, params2)
+        st.dataframe(df_out, use_container_width=True)
+
+    with st.expander("🔍 Debug (SQL + Params)"):
+                st.write(f"Intent: `{intent}` | Effective func filter: `{effective_func}`")
+                st.code(where_sql)
+                st.json({k: (v.isoformat() if hasattr(v, "isoformat") else v) for k, v in params.items()})
 
 
 # ---------------- Search Description tab ----------------
