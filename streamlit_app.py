@@ -109,6 +109,15 @@ def get_source_relation() -> str:
         return "public.v_finance_semantic"
     return "public.gl_register"
 
+def expense_amount_expr(rel: str) -> str:
+    """Best available expense outflow expression for a relation."""
+    if has_column(rel, "net_flow"):
+        return "coalesce(net_flow,0)"
+    if has_column(rel, "gl_amount"):
+        return "coalesce(gl_amount,0)"
+    return "coalesce(debit_payment,0) - coalesce(credit_deposit,0)"
+
+
 def tb_amount_expr(rel: str) -> str:
     """Best available amount expression for trial balance."""
     if has_column(rel, "gl_amount"):
@@ -634,12 +643,14 @@ with tab_exp:
         func_override=None,
     )
     where_sql = " and ".join(where) if where else "1=1"
+    exp_expr = expense_amount_expr(REL_EXP)
+
 
     sql = f"""
     select
       date_trunc('month', "date")::date as month,
       to_char(date_trunc('month', "date"), 'Mon-YY') as month_label,
-      sum(coalesce(net_flow,0)) as expense_outflow
+      sum({exp_expr}) as expense_outflow
     from {REL_EXP}
     where {where_sql}
     group by 1,2
@@ -659,7 +670,7 @@ with tab_exp:
     select
       to_char(date_trunc('month', "date"), 'Mon-YY') as month_label,
       head_name,
-      sum(coalesce(net_flow,0)) as outflow
+      sum({exp_expr}) as outflow
     from {REL_EXP}
     where {where_sql}
     group by 1,2
@@ -869,38 +880,31 @@ with tab_receivables:
     st.divider()
     st.caption("Receivable Ledger (Last 1000 rows)")
 
-        # ---------------- Ledger (schema-safe) ----------------
-    base_cols = ['"date"', "account", "head_name", "pay_to", "description",
-                "debit_payment", "credit_deposit", "gl_amount", "net_flow", "bill_no"]
-    optional_cols = ["voucher_no", "reference_no", "status", "bank", "func_code", "attribute"]
-
-    select_cols = []
-    for c in base_cols:
-        if c == '"date"' or has_column(REL_AR, c):
-            select_cols.append(c)
-    for c in optional_cols:
-        if has_column(REL_AR, c):
-            select_cols.append(c)
-
-    # Build conditional AR func filter only if func_code exists in REL_AR
-    ar_func_filter = ""
-    if has_column(REL_AR, "func_code"):
-        ar_func_filter = "and func_code in ('AGR','AMC','PAR','WAR')"
-
     ledger_sql = f"""
-    select {', '.join(select_cols)}
+    select
+      "date",
+      account,
+      head_name,
+      pay_to,
+      description,
+      debit_payment,
+      credit_deposit,
+      gl_amount,
+      bill_no,
+      voucher_no,
+      reference_no
     from {REL_AR}
     where {where_clause}
-      {ar_func_filter}
+      and func_code in ('AGR','AMC','PAR','WAR')
     order by "date" desc
     limit 1000
     """
     df_ledger = run_df(ledger_sql, params_base)
+if "show_df" in globals():
+    show_df(df_ledger)
+else:
+    st.dataframe(df_ledger, use_container_width=True)
 
-    if "show_df" in globals():
-        show_df(df_ledger)
-    else:
-        st.dataframe(df_ledger, use_container_width=True)
 
 # ---------------- AI Q&A tab ----------------
 with tab_qa:
@@ -1005,12 +1009,14 @@ with tab_qa:
         elif intent == "expense":
             rel = REL_EXP
 
+            exp_expr = expense_amount_expr(rel)
+
             if struct["by_head"] and struct["monthly"]:
                 st.subheader("Expense by Head (Monthly) — Pivot")
                 sql = f"""
                 select date_trunc('month',"date")::date as month,
                        head_name,
-                       sum(coalesce(net_flow,0)) as outflow
+                       sum({exp_expr}) as outflow
                 from {rel}
                 where {where_sql}
                 group by 1,2
@@ -1030,7 +1036,7 @@ with tab_qa:
                 st.subheader("Expense by Head")
                 sql = f"""
                 select head_name,
-                       sum(coalesce(net_flow,0)) as outflow
+                       sum({exp_expr}) as outflow
                 from {rel}
                 where {where_sql}
                 group by 1
@@ -1045,7 +1051,7 @@ with tab_qa:
                 sql = f"""
                 select date_trunc('month',"date")::date as month,
                        to_char(date_trunc('month',"date"), 'Mon-YY') as month_label,
-                       sum(coalesce(net_flow,0)) as outflow
+                       sum({exp_expr}) as outflow
                 from {rel}
                 where {where_sql}
                 group by 1,2
@@ -1056,7 +1062,7 @@ with tab_qa:
 
             else:
                 sql = f"""
-                select coalesce(sum(coalesce(net_flow,0)),0) as outflow
+                select coalesce(sum({exp_expr}),0) as outflow
                 from {rel}
                 where {where_sql}
                 """
@@ -1082,27 +1088,27 @@ with tab_qa:
             st.dataframe(df_out, use_container_width=True)
 
         elif intent == "trial_balance":
-            rel = REL_SEM
-            st.subheader("Trial Balance")
+    rel = REL_SEM
+    st.subheader("Trial Balance")
 
-            acct_expr = tb_account_expr(rel)
-            amt_expr = tb_amount_expr(rel)
+    acct_expr = tb_account_expr(rel)
+    amt_expr = tb_amount_expr(rel)
 
-            sql = f"""
-            select {acct_expr} as "Account",
-                sum({amt_expr}) as "Balance"
-            from {rel}
-            where {where_sql}
-            group by 1
-            order by 1
-            """
-            df_out = run_df(sql, params)
-            if "show_df" in globals():
-                show_df(df_out, label_col="Account")
-            else:
-                st.dataframe(df_out, use_container_width=True)
+    sql = f"""
+    select {acct_expr} as "Account",
+           sum({amt_expr}) as "Balance"
+    from {rel}
+    where {where_sql}
+    group by 1
+    order by 1
+    """
+    df_out = run_df(sql, params)
+    if "show_df" in globals():
+        show_df(df_out, label_col="Account")
+    else:
+        st.dataframe(df_out, use_container_width=True)
 
-        elif intent == "recoup":
+elif intent == "recoup":
             rel = REL_SEM
             st.subheader("Recoup (Pending vs Completed)")
 
@@ -1120,35 +1126,45 @@ with tab_qa:
             df_out = run_df(sql, params, ["State", "Amount"])
             st.dataframe(df_out, use_container_width=True)
 
-        else:
-            rel = REL_SEM
-            st.subheader("Search results (latest rows)")
+else:
+    rel = REL_SEM
+    st.subheader("Search results (latest rows)")
 
-            term = q.strip()
-            params2 = dict(params)
-            params2["q"] = f"%{term}%"
-            sql = f"""
-            select "date", bank, account, head_name, pay_to, description,
-                   debit_payment, credit_deposit, gl_amount, bill_no, status
-            from {rel}
-            where {where_sql}
-              and (
-                coalesce(description,'') ilike :q
-                or coalesce(pay_to,'') ilike :q
-                or coalesce(account,'') ilike :q
-                or coalesce(head_name,'') ilike :q
-              )
-            order by "date" desc
-            limit 500
-            """
-            df_out = run_df(
-                sql, params2,
-                ["date","bank","account","head_name","pay_to","description",
-                 "debit_payment","credit_deposit","gl_amount","bill_no","status"]
-            )
-            st.dataframe(df_out, use_container_width=True)
+    term = q.strip()
+    params2 = dict(params)
+    params2["q"] = f"%{term}%"
 
-        with st.expander("🔍 Debug (SQL + Params)"):
+    base_cols = ['"date"', "bank", "account", "head_name", "pay_to", "description"]
+    optional_cols = ["debit_payment", "credit_deposit", "gl_amount", "net_flow", "bill_no", "status",
+                     "voucher_no", "reference_no", "func_code", "attribute"]
+
+    select_cols = []
+    for c in base_cols:
+        if c == '"date"' or has_column(rel, c):
+            select_cols.append(c)
+    for c in optional_cols:
+        if has_column(rel, c):
+            select_cols.append(c)
+    if not select_cols:
+        select_cols = ['"date"', "description"]
+
+    sql = f"""
+    select {', '.join(select_cols)}
+    from {rel}
+    where {where_sql}
+      and (
+        coalesce(description,'') ilike :q
+        or coalesce(pay_to,'') ilike :q
+        or coalesce(account,'') ilike :q
+        or coalesce(head_name,'') ilike :q
+      )
+    order by "date" desc
+    limit 500
+    """
+    df_out = run_df(sql, params2)
+    st.dataframe(df_out, use_container_width=True)
+
+with st.expander("🔍 Debug (SQL + Params)"):
             st.write(f"Intent: `{intent}` | Effective func filter: `{effective_func}`")
             st.code(where_sql)
             st.json({k: (v.isoformat() if hasattr(v, "isoformat") else v) for k, v in params.items()})
