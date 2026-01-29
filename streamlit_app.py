@@ -1,6 +1,5 @@
 import streamlit as st
 import pandas as pd
-import numpy as np
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import OperationalError
 from datetime import date
@@ -110,35 +109,6 @@ def get_source_relation() -> str:
         return "public.v_finance_semantic"
     return "public.gl_register"
 
-def expense_amount_expr(rel: str) -> str:
-    """Best available expense outflow expression for a relation."""
-    if has_column(rel, "net_flow"):
-        return "coalesce(net_flow,0)"
-    if has_column(rel, "gl_amount"):
-        return "coalesce(gl_amount,0)"
-    return "coalesce(debit_payment,0) - coalesce(credit_deposit,0)"
-
-
-def tb_amount_expr(rel: str) -> str:
-    """Best available amount expression for trial balance."""
-    if has_column(rel, "gl_amount"):
-        return "coalesce(gl_amount,0)"
-    if has_column(rel, "net_flow"):
-        return "coalesce(net_flow,0)"
-    return "coalesce(debit_payment,0) - coalesce(credit_deposit,0)"
-
-
-def tb_account_expr(rel: str) -> str:
-    """Best available grouping key for trial balance."""
-    if has_column(rel, "account"):
-        return "account"
-    if has_column(rel, "head_name"):
-        return "head_name"
-    if has_column(rel, "bank"):
-        return "bank"
-    return "'UNKNOWN'"
-
-
 def pick_relation(candidates: list[str]) -> str:
     for c in candidates:
         if relation_exists(c):
@@ -236,22 +206,18 @@ def parse_month_range(q: str, default_year: int | None = None):
 def infer_date_sql(q: str):
     """Returns (sql_fragment, params_dict) or (None, {})."""
     ql = q.lower()
-
-    # IMPORTANT: Use triple-quoted SQL fragments to avoid escaping issues with "date".
     if "last month" in ql:
-        frag = """
-        "date" >= date_trunc('month', current_date) - interval '1 month'
-        and "date" <  date_trunc('month', current_date)
-        """
-        return frag.strip(), {}
-
+        return (
+            "\"date\" >= date_trunc('month', current_date) - interval '1 month' "
+            "and \"date\" < date_trunc('month', current_date)",
+            {}
+        )
     if "this month" in ql:
-        frag = """
-        "date" >= date_trunc('month', current_date)
-        and "date" <  date_trunc('month', current_date) + interval '1 month'
-        """
-        return frag.strip(), {}
-
+        return (
+            "\"date\" >= date_trunc('month', current_date) "
+            "and \"date\" < date_trunc('month', current_date) + interval '1 month'",
+            {}
+        )
     return None, {}
 
 def extract_payee(q: str):
@@ -377,60 +343,6 @@ def run_df(sql: str, params: dict, columns: list[str] | None = None) -> pd.DataF
         out.columns = columns
     return out
 
-
-# -------------------------------------------------
-# DATAFRAME DISPLAY HELPERS (Totals everywhere)
-# -------------------------------------------------
-def add_totals_table(df: pd.DataFrame, label_col: str | None = None, total_label: str = "TOTAL") -> pd.DataFrame:
-    """Append a totals row for all numeric columns."""
-    if df is None or df.empty:
-        return df
-    out = df.copy()
-    num_cols = out.select_dtypes(include=[np.number]).columns.tolist()
-    if not num_cols:
-        return out
-
-    total_row = {c: "" for c in out.columns}
-    for c in num_cols:
-        total_row[c] = float(pd.to_numeric(out[c], errors="coerce").fillna(0).sum())
-
-    if label_col and label_col in out.columns:
-        total_row[label_col] = total_label
-    else:
-        for c in out.columns:
-            if c not in num_cols:
-                total_row[c] = total_label
-                break
-
-    return pd.concat([out, pd.DataFrame([total_row])], ignore_index=True)
-
-
-def add_totals_pivot(pivot: pd.DataFrame, total_label: str = "TOTAL") -> pd.DataFrame:
-    """Add row totals + column totals + grand total to a pivot/cube."""
-    if pivot is None or pivot.empty:
-        return pivot
-    out = pivot.copy()
-    out = out.apply(pd.to_numeric, errors="coerce").fillna(0)
-    out[total_label] = out.sum(axis=1)
-    total_row = out.sum(axis=0).to_frame().T
-    total_row.index = [total_label]
-    return pd.concat([out, total_row], axis=0)
-
-
-def show_df(df: pd.DataFrame, *, label_col: str | None = None):
-    if df is None or df.empty:
-        st.info("No rows for selected filters.")
-        return
-    st.dataframe(add_totals_table(df, label_col=label_col), use_container_width=True)
-
-
-def show_pivot(pivot: pd.DataFrame):
-    if pivot is None or pivot.empty:
-        st.info("No rows for selected filters.")
-        return
-    st.dataframe(add_totals_pivot(pivot), use_container_width=True)
-
-
 # -------------------------------------------------
 # POWERPIVOT / DAX EQUIVALENT METRICS (SQL)
 # -------------------------------------------------
@@ -455,18 +367,22 @@ def compute_powerpivot_metrics(where_sql: str, params: dict, bank_revenue: str =
         params,
     )
 
+    
+    # Recoup definition (aligned with v_finance_semantic):
+    # Only rows where bank is the revenue recoup bank AND bill_no is exactly 'Recoup'
+    recoup_base_sql = "coalesce(bank,'') = :bank_revenue and bill_no = 'Recoup'"
+
     pending_recoup_debit = run_scalar(
         f"""
         select coalesce(sum(coalesce(debit_payment,0)),0)
         from {REL_SEM}
         where {where_sql}
-          and bill_no ilike '%recoup%'
+          and ({recoup_base_sql})
           and {_is_blank_sql('status')}
           and coalesce(account,'') <> coalesce(bank,'')
           and "date" >= :recoup_start
-          and coalesce(bank,'') <> :bank_assignment
-        """,
-        {**params, "recoup_start": RECoup_START_DATE, "bank_assignment": bank_assignment},
+                  """,
+        {**params, "recoup_start": RECoup_START_DATE, "bank_revenue": bank_revenue, "bank_assignment": bank_assignment},
     )
 
     completed_recoup = run_scalar(
@@ -474,11 +390,11 @@ def compute_powerpivot_metrics(where_sql: str, params: dict, bank_revenue: str =
         select coalesce(sum(coalesce(debit_payment,0)),0)
         from {REL_SEM}
         where {where_sql}
-          and bill_no ilike '%recoup%'
+          and ({recoup_base_sql})
           and {_not_blank_sql('status')}
           and coalesce(account,'') <> coalesce(bank,'')
         """,
-        params,
+        {**params, "bank_revenue": bank_revenue},
     )
 
     pending_recoup_minus_deposit = run_scalar(
@@ -489,14 +405,14 @@ def compute_powerpivot_metrics(where_sql: str, params: dict, bank_revenue: str =
             coalesce(sum(coalesce(credit_deposit,0)),0) as p_credit
           from {REL_SEM}
           where {where_sql}
-            and bill_no ilike '%recoup%'
+            and ({recoup_base_sql})
             and {_is_blank_sql('status')}
             and coalesce(account,'') <> coalesce(bank,'')
             and "date" >= :recoup_start
         )
         select (p_debit - p_credit) from p
         """,
-        {**params, "recoup_start": RECoup_START_DATE},
+        {**params, "recoup_start": RECoup_START_DATE, "bank_revenue": bank_revenue},
     )
 
     recoup_amount_revenue_bank = run_scalar(
@@ -504,8 +420,7 @@ def compute_powerpivot_metrics(where_sql: str, params: dict, bank_revenue: str =
         select coalesce(sum(coalesce(credit_deposit,0)),0)
         from {REL_SEM}
         where {where_sql}
-          and bill_no ilike '%recoup%'
-          and bank = :bank_revenue
+          and ({recoup_base_sql})
         """,
         {**params, "bank_revenue": bank_revenue},
     )
@@ -515,7 +430,7 @@ def compute_powerpivot_metrics(where_sql: str, params: dict, bank_revenue: str =
         select coalesce(sum(coalesce(debit_payment,0)),0)
         from {REL_SEM}
         where {where_sql}
-          and bill_no ilike '%recoup%'
+          and bill_no = 'Recoup'
           and bank = :bank_assignment
         """,
         {**params, "bank_assignment": bank_assignment},
@@ -530,10 +445,10 @@ def compute_powerpivot_metrics(where_sql: str, params: dict, bank_revenue: str =
         "Recoup Debit (Assignment Bank)": exp_recoup_from_assignment,
     }
 
-# -------------------------------------------------
-# UI FILTERS
-# -------------------------------------------------
-if "filters_applied" not in st.session_state:
+    # -------------------------------------------------
+    # UI FILTERS
+    # -------------------------------------------------
+    if "filters_applied" not in st.session_state:
     st.session_state.filters_applied = False
     st.session_state.df = date(2025, 1, 1)
     st.session_state.dt = date.today()
@@ -544,7 +459,7 @@ if "filters_applied" not in st.session_state:
     st.session_state.func_code = "ALL"
     st.session_state.fy_label = "ALL"
 
-with st.form(key="filter_form"):
+    with st.form(key="filter_form"):
     c1, c2 = st.columns(2)
     with c1:
         new_df = st.date_input("From Date", value=st.session_state.df)
@@ -580,7 +495,7 @@ with st.form(key="filter_form"):
 
     apply_filters = st.form_submit_button("Apply Filters")
 
-if apply_filters or not st.session_state.filters_applied:
+    if apply_filters or not st.session_state.filters_applied:
     st.session_state.filters_applied = True
     st.session_state.df = new_df
     st.session_state.dt = new_dt
@@ -591,19 +506,19 @@ if apply_filters or not st.session_state.filters_applied:
     st.session_state.func_code = new_func_code
     st.session_state.fy_label = new_fy_label
 
-df = st.session_state.df
-dt = st.session_state.dt
-bank = st.session_state.bank
-head = st.session_state.head
-account = st.session_state.account
-attribute = st.session_state.attribute
-func_code = st.session_state.func_code
-fy_label = st.session_state.fy_label
+    df = st.session_state.df
+    dt = st.session_state.dt
+    bank = st.session_state.bank
+    head = st.session_state.head
+    account = st.session_state.account
+    attribute = st.session_state.attribute
+    func_code = st.session_state.func_code
+    fy_label = st.session_state.fy_label
 
-# -------------------------------------------------
-# TABS
-# -------------------------------------------------
-tab_rev, tab_exp, tab_cf, tab_tb, tab_rec_kpi, tab_receivables, tab_qa, tab_search = st.tabs(
+    # -------------------------------------------------
+    # TABS
+    # -------------------------------------------------
+    tab_rev, tab_exp, tab_cf, tab_tb, tab_rec_kpi, tab_receivables, tab_qa, tab_search = st.tabs(
     [
         "Revenue",
         "Expense",
@@ -614,10 +529,10 @@ tab_rev, tab_exp, tab_cf, tab_tb, tab_rec_kpi, tab_receivables, tab_qa, tab_sear
         "AI Q&A",
         "Search Description",
     ]
-)
+    )
 
-# ---------------- Revenue tab ----------------
-with tab_rev:
+    # ---------------- Revenue tab ----------------
+    with tab_rev:
     st.subheader("Revenue Dashboard (Monthly)")
 
     where, params, _ = build_where_from_ui(
@@ -638,7 +553,7 @@ with tab_rev:
     order by 1
     """
     df_rev = run_df(sql_month, params, ["month_start", "month_label", "revenue_amount"])
-    show_df(df_rev, label_col="month_label")
+    st.dataframe(df_rev, use_container_width=True)
 
     st.divider()
     st.caption("Monthly Revenue by Head (Pivot) — Head rows × Month columns")
@@ -663,37 +578,37 @@ with tab_rev:
             aggfunc="sum",
             fill_value=0,
         )
-        show_pivot(cube)
+        st.dataframe(cube, use_container_width=True)
     else:
         st.info("No revenue data for selected filters.")
 
     st.divider()
     st.subheader("Finance Semantic Layer (How to read these numbers)")
     st.markdown("""
-**Revenue cube**
-- Rows: **Head Name**
-- Columns: **Month**
-- Measure: **credit_deposit** (revenue inflow)
-- Source: `v_revenue` (fallback: `v_finance_semantic` / `gl_register`)
+    **Revenue cube**
+    - Rows: **Head Name**
+    - Columns: **Month**
+    - Measure: **credit_deposit** (revenue inflow)
+    - Source: `v_revenue` (fallback: `v_finance_semantic` / `gl_register`)
 
-**Expense cube**
-- Rows: **Head Name**
-- Columns: **Month**
-- Measure: **net_flow** (cash outflow)
-- Rule: Expense is based on **column1 = 'Expense'**; it is **not removed** just because bill_no = 'Recoup'.
+    **Expense cube**
+    - Rows: **Head Name**
+    - Columns: **Month**
+    - Measure: **net_flow** (cash outflow)
+    - Rule: Expense is based on **column1 = 'Expense'**; it is **not removed** just because bill_no = 'Recoup'.
 
-**Cashflow cube**
-- Rows: **Bank × Direction**
-- Columns: **Month**
-- Measure: **abs(net_flow)** for in/out; net is **sum(net_flow)**
+    **Cashflow cube**
+    - Rows: **Bank × Direction**
+    - Columns: **Month**
+    - Measure: **abs(net_flow)** for in/out; net is **sum(net_flow)**
 
-**Workflow separation (recoup ≠ expense)**
-- **Recoup** is a settlement/workflow label (`bill_no='Recoup'`), tracked separately.
-- **Expense** remains expense even if later recouped; recoup status is reported in recoup views.
-""")
+    **Workflow separation (recoup ≠ expense)**
+    - **Recoup** is a settlement/workflow label (`bill_no='Recoup'`), tracked separately.
+    - **Expense** remains expense even if later recouped; recoup status is reported in recoup views.
+    """)
 
-# ---------------- Expense tab ----------------
-with tab_exp:
+    # ---------------- Expense tab ----------------
+    with tab_exp:
     st.subheader("Expenses (Monthly Net Cash Outflow)")
 
     where, params, _ = build_where_from_ui(
@@ -702,14 +617,12 @@ with tab_exp:
         func_override=None,
     )
     where_sql = " and ".join(where) if where else "1=1"
-    exp_expr = expense_amount_expr(REL_EXP)
-
 
     sql = f"""
     select
       date_trunc('month', "date")::date as month,
       to_char(date_trunc('month', "date"), 'Mon-YY') as month_label,
-      sum({exp_expr}) as expense_outflow
+      sum(coalesce(net_flow,0)) as expense_outflow
     from {REL_EXP}
     where {where_sql}
     group by 1,2
@@ -717,7 +630,7 @@ with tab_exp:
     """
     df_exp = run_df(sql, params, ["month", "month_label", "expense_outflow"])
     if not df_exp.empty:
-        show_df(df_exp, label_col="month_label")
+        st.dataframe(df_exp, use_container_width=True)
         st.line_chart(df_exp.set_index("month_label")["expense_outflow"])
         st.success(f"Total Expense Outflow: {df_exp['expense_outflow'].sum():,.0f} PKR")
     else:
@@ -729,7 +642,7 @@ with tab_exp:
     select
       to_char(date_trunc('month', "date"), 'Mon-YY') as month_label,
       head_name,
-      sum({exp_expr}) as outflow
+      sum(coalesce(net_flow,0)) as outflow
     from {REL_EXP}
     where {where_sql}
     group by 1,2
@@ -738,10 +651,10 @@ with tab_exp:
     df_exp_p = run_df(sql_exp_pivot, params, ["month_label", "head_name", "outflow"])
     if not df_exp_p.empty:
         cube = df_exp_p.pivot_table(index="head_name", columns="month_label", values="outflow", aggfunc="sum", fill_value=0)
-        show_pivot(cube)
+        st.dataframe(cube, use_container_width=True)
 
-# ---------------- Cashflow tab ----------------
-with tab_cf:
+    # ---------------- Cashflow tab ----------------
+    with tab_cf:
     st.subheader("Cashflow Summary (By Bank & Direction)")
 
     where, params, _ = build_where_from_ui(
@@ -768,7 +681,7 @@ with tab_cf:
     df_cf = run_df(sql, params, ["Bank", "Direction", "Amount"])
 
     if not df_cf.empty:
-        show_df(df_cf, label_col="Bank")
+        st.dataframe(df_cf, use_container_width=True)
 
         inflow = df_cf[df_cf["Direction"] == "in"]["Amount"].abs().sum()
         outflow = df_cf[df_cf["Direction"] == "out"]["Amount"].abs().sum()
@@ -808,54 +721,44 @@ with tab_cf:
             aggfunc="sum",
             fill_value=0,
         )
-        show_pivot(cube)
+        st.dataframe(cube, use_container_width=True)
     else:
         st.info("No cashflow rows for pivot under current filters.")
 
-# ---------------- Trial balance tab ----------------
-with tab_tb:
+    # ---------------- Trial balance tab ----------------
+    with tab_tb:
     st.subheader("Trial Balance (As of To Date)")
 
     where = ['"date" <= :dt']
     params = {"dt": dt}
 
-    if bank != "ALL" and has_column(REL_SEM, "bank"):
+    if bank != "ALL":
         where.append("bank = :bank"); params["bank"] = bank
-    if head != "ALL" and has_column(REL_SEM, "head_name"):
+    if head != "ALL":
         where.append("head_name = :head_name"); params["head_name"] = head
-    if account != "ALL" and has_column(REL_SEM, "account"):
+    if account != "ALL":
         where.append("account = :account"); params["account"] = account
-    if func_code != "ALL" and has_column(REL_SEM, "func_code"):
+    if func_code != "ALL":
         where.append("func_code = :func_code"); params["func_code"] = func_code
-    if attribute != "ALL" and has_column(REL_SEM, "attribute"):
-        where.append("attribute = :attribute"); params["attribute"] = attribute
-
-    acct_expr = tb_account_expr(REL_SEM)
-    amt_expr = tb_amount_expr(REL_SEM)
 
     sql = f"""
     select
-      {acct_expr} as "Account",
-      sum({amt_expr}) as "Balance"
+      account,
+      sum(coalesce(gl_amount,0)) as balance
     from {REL_SEM}
     where {' and '.join(where)}
     group by 1
     order by 1
     """
-    df_tb = run_df(sql, params)
+    df_tb = run_df(sql, params, ["Account", "Balance"])
     if not df_tb.empty:
-        # Prefer totals-aware renderer if present
-        if "show_df" in globals():
-            show_df(df_tb, label_col="Account")
-        else:
-            st.dataframe(df_tb, use_container_width=True)
-            st.success(f"Net (sum of balances): {df_tb['Balance'].sum():,.0f} PKR")
+        st.dataframe(df_tb, use_container_width=True)
+        st.success(f"Net (sum of balances): {df_tb['Balance'].sum():,.0f} PKR")
     else:
         st.info("No rows found for trial balance with current filters.")
 
-
-# ---------------- Recoup KPIs tab ----------------
-with tab_rec_kpi:
+    # ---------------- Recoup KPIs tab ----------------
+    with tab_rec_kpi:
     st.subheader("Recoup KPIs (PowerPivot/DAX equivalent)")
 
     c0, c1 = st.columns(2)
@@ -884,7 +787,7 @@ with tab_rec_kpi:
       coalesce(sum(coalesce(debit_payment,0) - coalesce(credit_deposit,0)),0) as pending_net
     from {REL_SEM}
     where {where_sql}
-      and bill_no ilike '%recoup%'
+      and ({recoup_base_sql})
       and {_is_blank_sql('status')}
       and coalesce(account,'') <> coalesce(bank,'')
       and "date" >= :recoup_start
@@ -892,14 +795,14 @@ with tab_rec_kpi:
     order by 2 desc
     limit 100
     """
-    df_pending = run_df(pending_by_head_sql, {**params, "recoup_start": RECoup_START_DATE}, ["Head", "Pending Net"])
+    df_pending = run_df(pending_by_head_sql, {**params, "recoup_start": RECoup_START_DATE, "bank_revenue": bank_revenue}, ["Head", "Pending Net"])
     if df_pending.empty:
         st.info("No pending recoup rows under current filters.")
     else:
-        show_df(df_pending, label_col="Head")
+        st.dataframe(df_pending, use_container_width=True)
 
-# ---------------- Receivables tab ----------------
-with tab_receivables:
+    # ---------------- Receivables tab ----------------
+    with tab_receivables:
     st.subheader("Receivables (Billing & Collection)")
 
     where_base, params_base, _ = build_where_from_ui(
@@ -939,36 +842,33 @@ with tab_receivables:
     st.divider()
     st.caption("Receivable Ledger (Last 1000 rows)")
 
-    # Schema-safe ledger SELECT list
-    base_cols = ['"date"', "account", "head_name", "pay_to", "description",
-                 "debit_payment", "credit_deposit", "gl_amount", "net_flow", "bill_no"]
-    optional_cols = ["voucher_no", "reference_no", "status", "bank", "func_code", "attribute"]
-
-    select_cols = []
-    for c in base_cols:
-        if c == '"date"' or has_column(REL_AR, c):
-            select_cols.append(c)
-    for c in optional_cols:
-        if has_column(REL_AR, c):
-            select_cols.append(c)
-
-    ar_filter = ""
-    if has_column(REL_AR, "func_code"):
-        ar_filter = "and func_code in ('AGR','AMC','PAR','WAR')"
-
     ledger_sql = f"""
-    select {', '.join(select_cols)}
+    select
+      "date",
+      account,
+      head_name,
+      pay_to,
+      description,
+      debit_payment,
+      credit_deposit,
+      gl_amount,
+      bill_no,
+      voucher_no,
+      reference_no
     from {REL_AR}
     where {where_clause}
-      {ar_filter}
+      and func_code in ('AGR','AMC','PAR','WAR')
     order by "date" desc
     limit 1000
     """
-    df_ledger = run_df(ledger_sql, params_base)
-    show_df(df_ledger)
+    df_ledger = run_df(
+        ledger_sql, params_base,
+        ["date","account","head_name","pay_to","description","debit_payment","credit_deposit","gl_amount","bill_no","voucher_no","reference_no"]
+    )
+    st.dataframe(df_ledger, use_container_width=True)
 
-# ---------------- AI Q&A tab ----------------
-with tab_qa:
+    # ---------------- AI Q&A tab ----------------
+    with tab_qa:
     st.subheader("Ask a Finance Question (Deterministic + Safe)")
     st.caption("Examples: revenue by head monthly | expense by head | cashflow by bank | pending recoup | trial balance | search vendor name")
 
@@ -986,7 +886,7 @@ with tab_qa:
             func_override=func_override,
         )
 
-        # Relative date overrides
+        # Override date filter if question specifies relative dates
         date_sql, date_params = infer_date_sql(q)
         if date_sql:
             where = [w for w in where if "between :df and :dt" not in w and '"date" between' not in w]
@@ -1027,7 +927,7 @@ with tab_qa:
                     pv = df_out.pivot_table(index="Head", columns="Month", values="Revenue", aggfunc="sum", fill_value=0)
                     pv = pv.reindex(sorted(pv.columns), axis=1)
                     pv.columns = [d.strftime("%b-%y") for d in pv.columns]
-                    show_pivot(pv)
+                    st.dataframe(pv.reset_index().rename(columns={"Head": "Head Name"}), use_container_width=True)
                 else:
                     st.warning("No rows found.")
 
@@ -1043,7 +943,7 @@ with tab_qa:
                 limit 50
                 """
                 df_out = run_df(sql, params, ["Head", "Revenue"])
-                show_df(df_out, label_col="Head")
+                st.dataframe(df_out, use_container_width=True)
 
             elif struct["monthly"]:
                 st.subheader("Monthly Revenue")
@@ -1057,7 +957,7 @@ with tab_qa:
                 order by 1
                 """
                 df_out = run_df(sql, params, ["Month", "Month Label", "Revenue"])
-                show_df(df_out, label_col="Month Label")
+                st.dataframe(df_out, use_container_width=True)
 
             else:
                 sql = f"""
@@ -1069,14 +969,13 @@ with tab_qa:
 
         elif intent == "expense":
             rel = REL_EXP
-            exp_expr = expense_amount_expr(rel)
 
             if struct["by_head"] and struct["monthly"]:
                 st.subheader("Expense by Head (Monthly) — Pivot")
                 sql = f"""
                 select date_trunc('month',"date")::date as month,
                        head_name,
-                       sum({exp_expr}) as outflow
+                       sum(coalesce(net_flow,0)) as outflow
                 from {rel}
                 where {where_sql}
                 group by 1,2
@@ -1088,7 +987,7 @@ with tab_qa:
                     pv = df_out.pivot_table(index="Head", columns="Month", values="Outflow", aggfunc="sum", fill_value=0)
                     pv = pv.reindex(sorted(pv.columns), axis=1)
                     pv.columns = [d.strftime("%b-%y") for d in pv.columns]
-                    show_pivot(pv)
+                    st.dataframe(pv.reset_index().rename(columns={"Head": "Head Name"}), use_container_width=True)
                 else:
                     st.warning("No rows found.")
 
@@ -1096,7 +995,7 @@ with tab_qa:
                 st.subheader("Expense by Head")
                 sql = f"""
                 select head_name,
-                       sum({exp_expr}) as outflow
+                       sum(coalesce(net_flow,0)) as outflow
                 from {rel}
                 where {where_sql}
                 group by 1
@@ -1104,25 +1003,25 @@ with tab_qa:
                 limit 50
                 """
                 df_out = run_df(sql, params, ["Head", "Outflow"])
-                show_df(df_out, label_col="Head")
+                st.dataframe(df_out, use_container_width=True)
 
             elif struct["monthly"]:
                 st.subheader("Monthly Expense")
                 sql = f"""
                 select date_trunc('month',"date")::date as month,
                        to_char(date_trunc('month',"date"), 'Mon-YY') as month_label,
-                       sum({exp_expr}) as outflow
+                       sum(coalesce(net_flow,0)) as outflow
                 from {rel}
                 where {where_sql}
                 group by 1,2
                 order by 1
                 """
                 df_out = run_df(sql, params, ["Month", "Month Label", "Outflow"])
-                show_df(df_out, label_col="Month Label")
+                st.dataframe(df_out, use_container_width=True)
 
             else:
                 sql = f"""
-                select coalesce(sum({exp_expr}),0) as outflow
+                select coalesce(sum(coalesce(net_flow,0)),0) as outflow
                 from {rel}
                 where {where_sql}
                 """
@@ -1145,25 +1044,22 @@ with tab_qa:
             order by 1,2
             """
             df_out = run_df(sql, params, ["Bank", "Direction", "Amount"])
-            show_df(df_out, label_col="Bank")
+            st.dataframe(df_out, use_container_width=True)
 
         elif intent == "trial_balance":
             rel = REL_SEM
             st.subheader("Trial Balance")
 
-            acct_expr = tb_account_expr(rel)
-            amt_expr = tb_amount_expr(rel)
-
             sql = f"""
-            select {acct_expr} as "Account",
-                   sum({amt_expr}) as "Balance"
+            select account,
+                   sum(coalesce(gl_amount,0)) as balance
             from {rel}
             where {where_sql}
             group by 1
             order by 1
             """
-            df_out = run_df(sql, params)
-            show_df(df_out, label_col="Account")
+            df_out = run_df(sql, params, ["Account", "Balance"])
+            st.dataframe(df_out, use_container_width=True)
 
         elif intent == "recoup":
             rel = REL_SEM
@@ -1175,13 +1071,13 @@ with tab_qa:
               coalesce(sum(coalesce(debit_payment,0) - coalesce(credit_deposit,0)),0) as amount
             from {rel}
             where {where_sql}
-              and bill_no ilike '%recoup%'
+              and ({recoup_base_sql})
               and coalesce(account,'') <> coalesce(bank,'')
             group by 1
             order by 1
             """
             df_out = run_df(sql, params, ["State", "Amount"])
-            show_df(df_out, label_col="State")
+            st.dataframe(df_out, use_container_width=True)
 
         else:
             rel = REL_SEM
@@ -1190,23 +1086,9 @@ with tab_qa:
             term = q.strip()
             params2 = dict(params)
             params2["q"] = f"%{term}%"
-
-            base_cols = ['"date"', "bank", "account", "head_name", "pay_to", "description"]
-            optional_cols = ["debit_payment", "credit_deposit", "gl_amount", "net_flow", "bill_no", "status",
-                             "voucher_no", "reference_no", "func_code", "attribute"]
-
-            select_cols = []
-            for c in base_cols:
-                if c == '"date"' or has_column(rel, c):
-                    select_cols.append(c)
-            for c in optional_cols:
-                if has_column(rel, c):
-                    select_cols.append(c)
-            if not select_cols:
-                select_cols = ['"date"', "description"]
-
             sql = f"""
-            select {', '.join(select_cols)}
+            select "date", bank, account, head_name, pay_to, description,
+                   debit_payment, credit_deposit, gl_amount, bill_no, status
             from {rel}
             where {where_sql}
               and (
@@ -1218,8 +1100,12 @@ with tab_qa:
             order by "date" desc
             limit 500
             """
-            df_out = run_df(sql, params2)
-            show_df(df_out)
+            df_out = run_df(
+                sql, params2,
+                ["date","bank","account","head_name","pay_to","description",
+                 "debit_payment","credit_deposit","gl_amount","bill_no","status"]
+            )
+            st.dataframe(df_out, use_container_width=True)
 
         with st.expander("🔍 Debug (SQL + Params)"):
             st.write(f"Intent: `{intent}` | Effective func filter: `{effective_func}`")
@@ -1227,8 +1113,8 @@ with tab_qa:
             st.json({k: (v.isoformat() if hasattr(v, "isoformat") else v) for k, v in params.items()})
 
 
-# ---------------- Search Description tab ----------------
-with tab_search:
+    # ---------------- Search Description tab ----------------
+    with tab_search:
     st.subheader("Search Description / Payee / Head / Account")
     term = st.text_input("Search text", value="", placeholder="e.g., recoup, salary, AGR, vendor name...")
     limit = st.slider("Rows", 50, 2000, 300, step=50)
@@ -1241,44 +1127,44 @@ with tab_search:
     where_sql = " and ".join(where) if where else "1=1"
 
     if term.strip():
-        params["q"] = f"%{term.strip()}%"
+    params["q"] = f"%{term.strip()}%"
 
-        # Schema-safe select list (REL_SEM may be a view without all columns)
-        base_cols = ['"date"', "bank", "account", "head_name", "pay_to", "description"]
-        optional_cols = ["attribute", "func_code", "debit_payment", "credit_deposit", "gl_amount", "net_flow", "bill_no", "status"]
+    # Schema-safe select list (REL_SEM may be a view without all columns)
+    base_cols = ['"date"', "bank", "account", "head_name", "pay_to", "description"]
+    optional_cols = ["attribute", "func_code", "debit_payment", "credit_deposit", "gl_amount", "net_flow", "bill_no", "status"]
 
-        select_cols = []
-        for c in base_cols:
-            if c == '"date"' or has_column(REL_SEM, c):
-                select_cols.append(c)
-        for c in optional_cols:
-            if has_column(REL_SEM, c):
-                select_cols.append(c)
-        if not select_cols:
-            select_cols = ['"date"', "description"]
+    select_cols = []
+    for c in base_cols:
+        if c == '"date"' or has_column(REL_SEM, c):
+            select_cols.append(c)
+    for c in optional_cols:
+        if has_column(REL_SEM, c):
+            select_cols.append(c)
+    if not select_cols:
+        select_cols = ['"date"', "description"]
 
-        sql = f"""
-        select {', '.join(select_cols)}
-        from {REL_SEM}
-        where {where_sql}
-          and (
-            coalesce(description,'') ilike :q
-            or coalesce(pay_to,'') ilike :q
-            or coalesce(account,'') ilike :q
-            or coalesce(head_name,'') ilike :q
-          )
-        order by "date" desc
-        limit {int(limit)}
-        """
-        df_s = run_df(sql, params)
+    sql = f"""
+    select {', '.join(select_cols)}
+    from {REL_SEM}
+    where {where_sql}
+      and (
+        coalesce(description,'') ilike :q
+        or coalesce(pay_to,'') ilike :q
+        or coalesce(account,'') ilike :q
+        or coalesce(head_name,'') ilike :q
+      )
+    order by "date" desc
+    limit {int(limit)}
+    """
+    df_s = run_df(sql, params)
 
-        # Net effect caption (if available)
-        if not df_s.empty:
-            if "net_flow" in df_s.columns:
-                st.caption(f"Net effect (sum net_flow): {df_s['net_flow'].sum():,.0f}")
-            elif "gl_amount" in df_s.columns:
-                st.caption(f"Net effect (sum gl_amount): {df_s['gl_amount'].sum():,.0f}")
+    # Net effect caption (if available)
+    if not df_s.empty:
+        if "net_flow" in df_s.columns:
+            st.caption(f"Net effect (sum net_flow): {df_s['net_flow'].sum():,.0f}")
+        elif "gl_amount" in df_s.columns:
+            st.caption(f"Net effect (sum gl_amount): {df_s['gl_amount'].sum():,.0f}")
 
-        show_df(df_s)
+    show_df(df_s)
     else:
-        st.info("Enter a search term to show results.")
+    st.info("Enter a search term to show results.")
