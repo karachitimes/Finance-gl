@@ -869,31 +869,38 @@ with tab_receivables:
     st.divider()
     st.caption("Receivable Ledger (Last 1000 rows)")
 
+        # ---------------- Ledger (schema-safe) ----------------
+    base_cols = ['"date"', "account", "head_name", "pay_to", "description",
+                "debit_payment", "credit_deposit", "gl_amount", "net_flow", "bill_no"]
+    optional_cols = ["voucher_no", "reference_no", "status", "bank", "func_code", "attribute"]
+
+    select_cols = []
+    for c in base_cols:
+        if c == '"date"' or has_column(REL_AR, c):
+            select_cols.append(c)
+    for c in optional_cols:
+        if has_column(REL_AR, c):
+            select_cols.append(c)
+
+    # Build conditional AR func filter only if func_code exists in REL_AR
+    ar_func_filter = ""
+    if has_column(REL_AR, "func_code"):
+        ar_func_filter = "and func_code in ('AGR','AMC','PAR','WAR')"
+
     ledger_sql = f"""
-    select
-      "date",
-      account,
-      head_name,
-      pay_to,
-      description,
-      debit_payment,
-      credit_deposit,
-      gl_amount,
-      bill_no,
-      voucher_no,
-      reference_no
+    select {', '.join(select_cols)}
     from {REL_AR}
     where {where_clause}
-      and func_code in ('AGR','AMC','PAR','WAR')
+      {ar_func_filter}
     order by "date" desc
     limit 1000
     """
     df_ledger = run_df(ledger_sql, params_base)
-if "show_df" in globals():
-    show_df(df_ledger)
-else:
-    st.dataframe(df_ledger, use_container_width=True)
 
+    if "show_df" in globals():
+        show_df(df_ledger)
+    else:
+        st.dataframe(df_ledger, use_container_width=True)
 
 # ---------------- AI Q&A tab ----------------
 with tab_qa:
