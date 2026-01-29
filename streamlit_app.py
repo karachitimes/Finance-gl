@@ -236,18 +236,22 @@ def parse_month_range(q: str, default_year: int | None = None):
 def infer_date_sql(q: str):
     """Returns (sql_fragment, params_dict) or (None, {})."""
     ql = q.lower()
+
+    # IMPORTANT: Use triple-quoted SQL fragments to avoid escaping issues with "date".
     if "last month" in ql:
-        return (
-            ""date" >= date_trunc('month', current_date) - interval '1 month' "
-            "and "date" < date_trunc('month', current_date)",
-            {}
-        )
+        frag = """
+        "date" >= date_trunc('month', current_date) - interval '1 month'
+        and "date" <  date_trunc('month', current_date)
+        """
+        return frag.strip(), {}
+
     if "this month" in ql:
-        return (
-            ""date" >= date_trunc('month', current_date) "
-            "and "date" < date_trunc('month', current_date) + interval '1 month'",
-            {}
-        )
+        frag = """
+        "date" >= date_trunc('month', current_date)
+        and "date" <  date_trunc('month', current_date) + interval '1 month'
+        """
+        return frag.strip(), {}
+
     return None, {}
 
 def extract_payee(q: str):
