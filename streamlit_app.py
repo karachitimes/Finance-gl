@@ -1101,33 +1101,50 @@ with tab_qa:
             df_out = run_df(sql, params, ["State", "Amount"])
             st.dataframe(df_out, use_container_width=True)
 
-        else:
-            rel = REL_SEM
-            st.subheader("Search results (latest rows)")
 
-            term = q.strip()
-            params2 = dict(params)
-            params2["q"] = f"%{term}%"
-            sql = f"""
-            select "date", bank, account, head_name, pay_to, description,
-                   debit_payment, credit_deposit, gl_amount, bill_no, status
-            from {rel}
-            where {where_sql}
-              and (
-                coalesce(description,'') ilike :q
-                or coalesce(pay_to,'') ilike :q
-                or coalesce(account,'') ilike :q
-                or coalesce(head_name,'') ilike :q
-              )
-            order by "date" desc
-            limit 500
-            """
-            df_out = run_df(
-                sql, params2,
-                ["date","bank","account","head_name","pay_to","description",
-                 "debit_payment","credit_deposit","gl_amount","bill_no","status"]
-            )
-            st.dataframe(df_out, use_container_width=True)
+else:
+    rel = REL_SEM
+    st.subheader("Search results (latest rows)")
+
+    term = q.strip()
+    params2 = dict(params)
+    params2["q"] = f"%{term}%"
+
+    # Schema-safe select list (views may not expose gl_amount/status/etc.)
+    base_cols = ['"date"', "bank", "account", "head_name", "pay_to", "description"]
+    optional_cols = [
+        "debit_payment", "credit_deposit", "gl_amount", "net_flow",
+        "bill_no", "status", "voucher_no", "reference_no", "func_code", "attribute"
+    ]
+
+    select_cols = []
+    for c in base_cols:
+        if c == '"date"' or has_column(rel, c):
+            select_cols.append(c)
+
+    for c in optional_cols:
+        if has_column(rel, c):
+            select_cols.append(c)
+
+    # Always have at least date + description for meaningful output
+    if not select_cols:
+        select_cols = ['"date"', "description"]
+
+    sql = f"""
+    select {', '.join(select_cols)}
+    from {rel}
+    where {where_sql}
+      and (
+        coalesce(description,'') ilike :q
+        or coalesce(pay_to,'') ilike :q
+        or coalesce(account,'') ilike :q
+        or coalesce(head_name,'') ilike :q
+      )
+    order by "date" desc
+    limit 500
+    """
+    df_out = run_df(sql, params2)
+    st.dataframe(df_out, use_container_width=True)
 
         with st.expander("🔍 Debug (SQL + Params)"):
             st.write(f"Intent: `{intent}` | Effective func filter: `{effective_func}`")
