@@ -1075,27 +1075,27 @@ with tab_qa:
             st.dataframe(df_out, use_container_width=True)
 
         elif intent == "trial_balance":
-    rel = REL_SEM
-    st.subheader("Trial Balance")
+            rel = REL_SEM
+            st.subheader("Trial Balance")
 
-    acct_expr = tb_account_expr(rel)
-    amt_expr = tb_amount_expr(rel)
+            acct_expr = tb_account_expr(rel)
+            amt_expr = tb_amount_expr(rel)
 
-    sql = f"""
-    select {acct_expr} as "Account",
-           sum({amt_expr}) as "Balance"
-    from {rel}
-    where {where_sql}
-    group by 1
-    order by 1
-    """
-    df_out = run_df(sql, params)
-    if "show_df" in globals():
-        show_df(df_out, label_col="Account")
-    else:
-        st.dataframe(df_out, use_container_width=True)
+            sql = f"""
+            select {acct_expr} as "Account",
+                sum({amt_expr}) as "Balance"
+            from {rel}
+            where {where_sql}
+            group by 1
+            order by 1
+            """
+            df_out = run_df(sql, params)
+            if "show_df" in globals():
+                show_df(df_out, label_col="Account")
+            else:
+                st.dataframe(df_out, use_container_width=True)
 
-elif intent == "recoup":
+        elif intent == "recoup":
             rel = REL_SEM
             st.subheader("Recoup (Pending vs Completed)")
 
