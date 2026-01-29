@@ -99,29 +99,6 @@ def cashflow_dir_expr(rel: str, net_expr: str) -> str:
         return "direction"
     return f"case when {net_expr} >= 0 then 'out' else 'in' end"
 
-def tb_amount_expr(rel: str) -> str:
-    """Return best available expression for trial balance amounts."""
-    # Preferred: gl_amount (already signed per your ledger)
-    if has_column(rel, "gl_amount"):
-        return "coalesce(gl_amount,0)"
-    # Next: net_flow (signed cash movement)
-    if has_column(rel, "net_flow"):
-        return "coalesce(net_flow,0)"
-    # Last fallback: debit-credit (signed)
-    return "coalesce(debit_payment,0) - coalesce(credit_deposit,0)"
-
-
-def tb_account_expr(rel: str) -> str:
-    """Return best available dimension for trial balance grouping."""
-    if has_column(rel, "account"):
-        return "account"
-    if has_column(rel, "head_name"):
-        return "head_name"
-    if has_column(rel, "bank"):
-        return "bank"
-    return "'UNKNOWN'"
-
-
 @st.cache_data(ttl=3600)
 def get_source_relation() -> str:
     """
@@ -466,7 +443,7 @@ def compute_powerpivot_metrics(where_sql: str, params: dict, bank_revenue: str =
     }
 
 # -------------------------------------------------
-# UI FILTERS
+# UI FILTERS (Top Horizontal Bar)
 # -------------------------------------------------
 if "filters_applied" not in st.session_state:
     st.session_state.filters_applied = False
@@ -479,13 +456,29 @@ if "filters_applied" not in st.session_state:
     st.session_state.func_code = "ALL"
     st.session_state.fy_label = "ALL"
 
-with st.form(key="filter_form"):
-    c1, c2 = st.columns(2)
-    with c1:
-        new_df = st.date_input("From Date", value=st.session_state.df)
-    with c2:
-        new_dt = st.date_input("To Date", value=st.session_state.dt)
+# Optional: sticky filter bar (feels like a top menu)
+st.markdown(
+    """
+<style>
+/* Make the filter form stick near the top while scrolling */
+div[data-testid="stVerticalBlockBorderWrapper"]:has(> div > div > div[data-testid="stForm"]) {
+  position: sticky;
+  top: 0.5rem;
+  z-index: 999;
+  background: white;
+  padding-top: 0.25rem;
+  padding-bottom: 0.25rem;
+  border-bottom: 1px solid rgba(0,0,0,0.08);
+}
+</style>
+""",
+    unsafe_allow_html=True,
+)
 
+st.markdown("### Filters")
+
+with st.form("filter_form", clear_on_submit=False):
+    # Pre-fetch distinct lists once for index lookups (cached by @st.cache_data)
     banks = ["ALL"] + get_distinct("bank")
     heads = ["ALL"] + get_distinct("head_name")
     accounts = ["ALL"] + get_distinct("account")
@@ -496,24 +489,32 @@ with st.form(key="filter_form"):
     attrs_list = ["ALL"] + sorted(attributes)
     funcs = ["ALL"] + get_distinct("func_code")
 
+    # Fiscal Year options
+    years = get_distinct_years()
+    fy_options = ["ALL"] + [f"FY{y}-{(y+1)%100:02d}" for y in years]
+
+    # Indices for current selections (preserve state on rerun)
     b_idx = banks.index(st.session_state.bank) if st.session_state.bank in banks else 0
     h_idx = heads.index(st.session_state.head) if st.session_state.head in heads else 0
     a_idx = accounts.index(st.session_state.account) if st.session_state.account in accounts else 0
     attr_idx = attrs_list.index(st.session_state.attribute) if st.session_state.attribute in attrs_list else 0
     f_idx = funcs.index(st.session_state.func_code) if st.session_state.func_code in funcs else 0
-
-    new_bank = st.selectbox("Bank", banks, index=b_idx)
-    new_head = st.selectbox("Head", heads, index=h_idx)
-    new_account = st.selectbox("Account", accounts, index=a_idx)
-    new_attribute = st.selectbox("Attribute", attrs_list, index=attr_idx)
-    new_func_code = st.selectbox("Function Code", funcs, index=f_idx)
-
-    years = get_distinct_years()
-    fy_options = ["ALL"] + [f"FY{y}-{(y+1)%100:02d}" for y in years]
     fy_idx = fy_options.index(st.session_state.fy_label) if st.session_state.fy_label in fy_options else 0
-    new_fy_label = st.selectbox("Fiscal Year", fy_options, index=fy_idx)
 
-    apply_filters = st.form_submit_button("Apply Filters")
+    # Row 1
+    r1 = st.columns([1, 1, 1, 1])
+    new_df = r1[0].date_input("From", value=st.session_state.df)
+    new_dt = r1[1].date_input("To", value=st.session_state.dt)
+    new_fy_label = r1[2].selectbox("Fiscal Year", fy_options, index=fy_idx)
+    new_bank = r1[3].selectbox("Bank", banks, index=b_idx)
+
+    # Row 2
+    r2 = st.columns([1, 1, 1, 1, 1])
+    new_head = r2[0].selectbox("Head", heads, index=h_idx)
+    new_account = r2[1].selectbox("Account", accounts, index=a_idx)
+    new_attribute = r2[2].selectbox("Attribute", attrs_list, index=attr_idx)
+    new_func_code = r2[3].selectbox("Func Code", funcs, index=f_idx)
+    apply_filters = r2[4].form_submit_button("Apply ✅")
 
 if apply_filters or not st.session_state.filters_applied:
     st.session_state.filters_applied = True
@@ -526,6 +527,7 @@ if apply_filters or not st.session_state.filters_applied:
     st.session_state.func_code = new_func_code
     st.session_state.fy_label = new_fy_label
 
+# Read filter values from session state
 df = st.session_state.df
 dt = st.session_state.dt
 bank = st.session_state.bank
@@ -752,23 +754,19 @@ with tab_tb:
     where = ['"date" <= :dt']
     params = {"dt": dt}
 
-    # Optional slicers (only add if columns exist in the chosen relation)
-    if bank != "ALL" and has_column(REL_SEM, "bank"):
+    if bank != "ALL":
         where.append("bank = :bank"); params["bank"] = bank
-    if head != "ALL" and has_column(REL_SEM, "head_name"):
+    if head != "ALL":
         where.append("head_name = :head_name"); params["head_name"] = head
-    if account != "ALL" and has_column(REL_SEM, "account"):
+    if account != "ALL":
         where.append("account = :account"); params["account"] = account
-    if func_code != "ALL" and has_column(REL_SEM, "func_code"):
+    if func_code != "ALL":
         where.append("func_code = :func_code"); params["func_code"] = func_code
-
-    acct_expr = tb_account_expr(REL_SEM)
-    amt_expr = tb_amount_expr(REL_SEM)
 
     sql = f"""
     select
-      {acct_expr} as account_key,
-      sum({amt_expr}) as balance
+      account,
+      sum(coalesce(gl_amount,0)) as balance
     from {REL_SEM}
     where {' and '.join(where)}
     group by 1
@@ -780,7 +778,6 @@ with tab_tb:
         st.success(f"Net (sum of balances): {df_tb['Balance'].sum():,.0f} PKR")
     else:
         st.info("No rows found for trial balance with current filters.")
-
 
 # ---------------- Recoup KPIs tab ----------------
 with tab_rec_kpi:
@@ -867,35 +864,30 @@ with tab_receivables:
     st.divider()
     st.caption("Receivable Ledger (Last 1000 rows)")
 
-    # Build a schema-safe ledger SELECT list (views may not expose voucher_no/reference_no etc.)
-base_cols = [
-    '"date"', "account", "head_name", "pay_to", "description",
-    "debit_payment", "credit_deposit", "gl_amount", "bill_no"
-]
-optional_cols = ["voucher_no", "reference_no", "status", "bank", "func_code", "attribute", "net_flow"]
-
-select_cols = []
-for c in base_cols:
-    # quoted date already safe
-    if c == '"date"' or has_column(REL_AR, c):
-        select_cols.append(c)
-
-for c in optional_cols:
-    if has_column(REL_AR, c):
-        select_cols.append(c)
-
-ledger_sql = f"""
-select
-  {', '.join(select_cols)}
-from {REL_AR}
-where {where_clause}
-  and func_code in ('AGR','AMC','PAR','WAR')
-order by "date" desc
-limit 1000
-"""
-
-df_ledger = run_df(ledger_sql, params_base)
-st.dataframe(df_ledger, use_container_width=True)
+    ledger_sql = f"""
+    select
+      "date",
+      account,
+      head_name,
+      pay_to,
+      description,
+      debit_payment,
+      credit_deposit,
+      gl_amount,
+      bill_no,
+      voucher_no,
+      reference_no
+    from {REL_AR}
+    where {where_clause}
+      and func_code in ('AGR','AMC','PAR','WAR')
+    order by "date" desc
+    limit 1000
+    """
+    df_ledger = run_df(
+        ledger_sql, params_base,
+        ["date","account","head_name","pay_to","description","debit_payment","credit_deposit","gl_amount","bill_no","voucher_no","reference_no"]
+    )
+    st.dataframe(df_ledger, use_container_width=True)
 
 # ---------------- AI Q&A tab ----------------
 with tab_qa:
@@ -923,7 +915,7 @@ with tab_qa:
             where.insert(0, date_sql)
             params.update(date_params)
 
-        # Month-range overrides (e.g., "July to January")
+        # Month-range overrides
         m_start, m_end_excl = parse_month_range(q)
         if m_start and m_end_excl:
             where = [w for w in where if "between :df and :dt" not in w and '"date" between' not in w]
@@ -937,7 +929,6 @@ with tab_qa:
 
         where_sql = " and ".join(where) if where else "1=1"
 
-        # ---------------- intent routing ----------------
         if intent == "revenue":
             rel = REL_REV
 
@@ -971,7 +962,7 @@ with tab_qa:
                 where {where_sql}
                 group by 1
                 order by 2 desc
-                limit 100
+                limit 50
                 """
                 df_out = run_df(sql, params, ["Head", "Revenue"])
                 st.dataframe(df_out, use_container_width=True)
@@ -1031,7 +1022,7 @@ with tab_qa:
                 where {where_sql}
                 group by 1
                 order by 2 desc
-                limit 100
+                limit 50
                 """
                 df_out = run_df(sql, params, ["Head", "Outflow"])
                 st.dataframe(df_out, use_container_width=True)
@@ -1081,12 +1072,9 @@ with tab_qa:
             rel = REL_SEM
             st.subheader("Trial Balance")
 
-            acct_expr = tb_account_expr(rel)
-            amt_expr = tb_amount_expr(rel)
-
             sql = f"""
-            select {acct_expr} as account_key,
-                   sum({amt_expr}) as balance
+            select account,
+                   sum(coalesce(gl_amount,0)) as balance
             from {rel}
             where {where_sql}
             group by 1
