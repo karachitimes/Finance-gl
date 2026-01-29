@@ -306,6 +306,24 @@ def apply_intent_func_override(intent: str, question: str, ui_func_code: str):
         return None  # ignore UI func_code filter
     return USE_UI
 
+
+# -------------------------------------------------
+# RELATION PICKER (prefer semantic sub-views when available)
+# -------------------------------------------------
+@st.cache_data(ttl=3600)
+def relation_exists(rel: str) -> bool:
+    with engine.connect() as conn:
+        try:
+            conn.execute(text(f"SELECT 1 FROM {rel} LIMIT 1"))
+            return True
+        except Exception:
+            return False
+
+@st.cache_data(ttl=3600)
+def pick_view(preferred: str, fallback: str) -> str:
+    """Return preferred relation if it exists, else fallback."""
+    return preferred if relation_exists(preferred) else fallback
+
 # -------------------------------------------------
 # POWERPIVOT / DAX EQUIVALENT METRICS (SQL)
 # -------------------------------------------------
@@ -343,6 +361,55 @@ def run_df(sql: str, params: dict, columns: list[str] | None = None) -> pd.DataF
     if columns and not df_out.empty:
         df_out.columns = columns
     return df_out
+
+
+# -------------------------------------------------
+# SCHEMA HELPERS (views/tables may differ)
+# -------------------------------------------------
+@st.cache_data(ttl=3600)
+def has_column(rel: str, col: str) -> bool:
+    """Check if a relation (table/view) has a given column."""
+    # rel may be 'schema.name' or just 'name'
+    if "." in rel:
+        schema, name = rel.split(".", 1)
+    else:
+        schema, name = "public", rel
+    with engine.connect() as conn:
+        q = text("""
+            select 1
+            from information_schema.columns
+            where table_schema = :schema
+              and table_name = :name
+              and column_name = :col
+            limit 1
+        """)
+        return conn.execute(q, {"schema": schema, "name": name, "col": col}).scalar() is not None
+
+
+def expense_amount_expr(rel: str) -> str:
+    """SQL expression for expense outflow amount, schema-safe."""
+    if has_column(rel, "net_flow"):
+        return "greatest(coalesce(net_flow,0),0)"
+    if has_column(rel, "gl_amount"):
+        return "greatest(coalesce(gl_amount,0),0)"
+    return "greatest(coalesce(debit_payment,0) - coalesce(credit_deposit,0),0)"
+
+
+def cashflow_net_expr(rel: str) -> str:
+    """SQL expression for net cash movement, schema-safe."""
+    if has_column(rel, "net_flow"):
+        return "coalesce(net_flow,0)"
+    if has_column(rel, "gl_amount"):
+        return "coalesce(gl_amount,0)"
+    return "(coalesce(debit_payment,0) - coalesce(credit_deposit,0))"
+
+
+def cashflow_dir_expr(rel: str, net_expr: str) -> str:
+    """SQL expression to classify direction based on net expression."""
+    if has_column(rel, "direction"):
+        return "direction"
+    return f"(case when {net_expr} >= 0 then 'out' else 'in' end)"
+
 
 
 
@@ -601,84 +668,134 @@ tab_rev, tab_exp, tab_cf, tab_tb, tab_rec_kpi, tab_receivables, tab_qa, tab_sear
 # ---------------- Revenue tab ----------------
 with tab_rev:
     st.subheader("Revenue (Monthly)")
-    where, params, _ = build_where_from_ui(df, dt, bank, head, account, attribute, func_code, fy_label=fy_label, func_override="Revenue")
 
-    # Use abs(gl_amount)/2 to avoid double‐counting mirrored debit/credit rows.
+    rel_sem = get_source_relation()
+    rel_rev = pick_view("public.v_revenue", rel_sem)
+
+    where, params, _ = build_where_from_ui(
+        df, dt, bank, head, account, attribute, func_code,
+        fy_label=fy_label,
+        func_override="Revenue"
+    )
+    where_sql = " and ".join(where) if where else "1=1"
+
+    # Revenue amount basis:
+    # - If v_revenue exists: credit_deposit (semantic rule)
+    # - Else if v_finance_semantic exists: credit_deposit (with is_revenue)
+    # - Else raw gl_register: credit_deposit with func_code='Revenue'
+    extra = ""
+    if rel_rev.endswith("v_finance_semantic"):
+        extra = "and is_revenue = true"
+    elif rel_rev.endswith("gl_register"):
+        extra = "and func_code = 'Revenue' and coalesce(credit_deposit,0) > 0"
+
     sql = f"""
-    select date_trunc('month', "date") as month,
-           sum(abs(gl_amount))/2 as revenue
-    from public.gl_register
-    where {' and '.join(where)}
-      and entry_type = 'revenue'
-    group by 1
+    select date_trunc('month', "date")::date as month,
+           to_char(date_trunc('month', "date"), 'Mon-YY') as month_label,
+           sum(coalesce(credit_deposit,0)) as revenue
+    from {rel_rev}
+    where {where_sql}
+      {extra}
+    group by 1,2
     order by 1
     """
-    with engine.connect() as conn:
-        rows = conn.execute(text(sql), params).fetchall()
-
-    if rows:
-        df_rev = pd.DataFrame(rows, columns=["Month", "Revenue"])
-        show_df(df_rev, label_col='month_label')
-        st.line_chart(df_rev.set_index("Month"))
-        st.success(f"Total Revenue: {df_rev['Revenue'].sum():,.0f} PKR")
-    else:
+    df_rev = run_df(sql, params, ["Month", "Month Label", "Revenue"])
+    if df_rev.empty:
         st.info("No revenue rows found for selected filters/date range.")
+    else:
+        show_df(df_rev, label_col="Month Label")
+        st.line_chart(df_rev.set_index("Month")["Revenue"])
+        st.success(f"Total Revenue: {df_rev['Revenue'].sum():,.0f} PKR")
+
+# ---------------- Expense tab ----------------
 
 # ---------------- Expense tab ----------------
 with tab_exp:
     st.subheader("Expenses (Monthly)")
-    where, params, _ = build_where_from_ui(df, dt, bank, head, account, attribute, func_code, fy_label=fy_label, func_override=None)
 
-    # Sum expense_amount; expense transactions typically aren't duplicated the same way as revenue, so no division by 2.
+    rel_sem = get_source_relation()
+    rel_exp = pick_view("public.v_expense", rel_sem)
+
+    where, params, _ = build_where_from_ui(
+        df, dt, bank, head, account, attribute, func_code,
+        fy_label=fy_label,
+        func_override=None
+    )
+    where_sql = " and ".join(where) if where else "1=1"
+
+    # Expense amount basis: use net_flow when present, otherwise derive from debit-credit.
+    amt_expr = expense_amount_expr(rel_exp)
+
+    extra = ""
+    if rel_exp.endswith("v_finance_semantic"):
+        extra = "and is_expense = true"
+    elif rel_exp.endswith("gl_register"):
+        # Raw fallback: expense identified by column1='Expense' and positive net outflow
+        extra = "and lower(trim(coalesce(column1,''))) = 'expense'"
+
     sql = f"""
-    select date_trunc('month', "date") as month,
-           sum(coalesce(expense_amount,0)) as expense
-    from public.gl_register
-    where {' and '.join(where)}
-      and entry_type = 'expense'
-    group by 1
+    select date_trunc('month', "date")::date as month,
+           to_char(date_trunc('month', "date"), 'Mon-YY') as month_label,
+           sum({amt_expr}) as expense_outflow
+    from {rel_exp}
+    where {where_sql}
+      {extra}
+    group by 1,2
     order by 1
     """
-    with engine.connect() as conn:
-        rows = conn.execute(text(sql), params).fetchall()
-
-    if rows:
-        df_exp = pd.DataFrame(rows, columns=["Month", "Expense"])
-        show_df(df_exp, label_col='month_label')
-        st.line_chart(df_exp.set_index("Month"))
-        st.success(f"Total Expense: {df_exp['Expense'].sum():,.0f} PKR")
-    else:
+    df_exp = run_df(sql, params, ["Month", "Month Label", "Expense Outflow"])
+    if df_exp.empty:
         st.info("No expense rows found for selected filters/date range.")
+    else:
+        show_df(df_exp, label_col="Month Label")
+        st.line_chart(df_exp.set_index("Month")["Expense Outflow"])
+        st.success(f"Total Expense Outflow: {df_exp['Expense Outflow'].sum():,.0f} PKR")
+
+# ---------------- Cashflow tab ----------------
 
 # ---------------- Cashflow tab ----------------
 with tab_cf:
     st.subheader("Cashflow Summary (By Bank & Direction)")
-    where, params, _ = build_where_from_ui(df, dt, bank, head, account, attribute, func_code, fy_label=fy_label, func_override=None)
+
+    rel_sem = get_source_relation()
+    rel_cf = pick_view("public.v_cashflow", rel_sem)
+
+    where, params, _ = build_where_from_ui(
+        df, dt, bank, head, account, attribute, func_code,
+        fy_label=fy_label,
+        func_override=None
+    )
+    where_sql = " and ".join(where) if where else "1=1"
+
+    if rel_cf.endswith("v_cashflow"):
+        net_expr = "coalesce(net_flow,0)"
+        dir_expr = "direction"
+    else:
+        net_expr = cashflow_net_expr(rel_cf)
+        dir_expr = cashflow_dir_expr(rel_cf, net_expr)
 
     sql = f"""
     select
       coalesce(bank, 'UNKNOWN') as bank,
-      direction,
-      sum(gl_amount) as amount
-    from public.gl_register
-    where {' and '.join(where)}
+      {dir_expr} as direction,
+      sum({net_expr}) as amount
+    from {rel_cf}
+    where {where_sql}
     group by 1,2
     order by 1,2
     """
-    with engine.connect() as conn:
-        rows = conn.execute(text(sql), params).fetchall()
-
-    if rows:
-        df_cf = pd.DataFrame(rows, columns=["Bank", "Direction", "Amount"])
-        show_df(df_cf, label_col='Bank')
-
+    df_cf = run_df(sql, params, ["Bank", "Direction", "Amount"])
+    if df_cf.empty:
+        st.info("No rows found for selected filters/date range.")
+    else:
+        show_df(df_cf, label_col="Bank")
         inflow = df_cf[df_cf["Direction"] == "in"]["Amount"].sum()
-        outflow = df_cf[df_cf["Direction"] == "out"]["Amount"].sum()  # likely negative
+        outflow = df_cf[df_cf["Direction"] == "out"]["Amount"].sum()
         st.success(
             f"Inflow: {inflow:,.0f} PKR  |  Outflow: {abs(outflow):,.0f} PKR  |  Net: {(inflow+outflow):,.0f} PKR"
         )
-    else:
-        st.info("No rows found for selected filters/date range.")
+
+# ---------------- Trial balance tab ----------------
 
 # ---------------- Trial balance tab ----------------
 with tab_tb:
@@ -1048,7 +1165,6 @@ with tab_qa:
                 select coalesce(sum(coalesce(recoup_pending_amount,0)),0) as pending_recoup
                 from public.gl_register
                 where {where_sql}
-                  and entry_type='recoup'
                   and recoup_state='pending'
                   and bill_no ilike '%recoup%'
                   and {_is_blank_sql('status')}
@@ -1059,7 +1175,6 @@ with tab_qa:
                 select coalesce(sum(abs(gl_amount)),0) as recouped_total
                 from public.gl_register
                 where {where_sql}
-                  and entry_type='recoup'
                   and recoup_state='recouped'
                   and bill_no ilike '%recoup%'
                   and {_not_blank_sql('status')}
@@ -1070,7 +1185,6 @@ with tab_qa:
                 select coalesce(sum(abs(gl_amount)),0) as recoup_total
                 from public.gl_register
                 where {where_sql}
-                  and entry_type='recoup'
                   and bill_no ilike '%recoup%'
                 """
 
