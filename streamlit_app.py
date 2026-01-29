@@ -238,14 +238,14 @@ def infer_date_sql(q: str):
     ql = q.lower()
     if "last month" in ql:
         return (
-            "\"date\" >= date_trunc('month', current_date) - interval '1 month' "
-            "and \"date\" < date_trunc('month', current_date)",
+            ""date" >= date_trunc('month', current_date) - interval '1 month' "
+            "and "date" < date_trunc('month', current_date)",
             {}
         )
     if "this month" in ql:
         return (
-            "\"date\" >= date_trunc('month', current_date) "
-            "and \"date\" < date_trunc('month', current_date) + interval '1 month'",
+            ""date" >= date_trunc('month', current_date) "
+            "and "date" < date_trunc('month', current_date) + interval '1 month'",
             {}
         )
     return None, {}
@@ -634,7 +634,7 @@ with tab_rev:
     order by 1
     """
     df_rev = run_df(sql_month, params, ["month_start", "month_label", "revenue_amount"])
-    show_df(df_rev, label_col=\"month_label\")
+    show_df(df_rev, label_col="month_label")
 
     st.divider()
     st.caption("Monthly Revenue by Head (Pivot) — Head rows × Month columns")
@@ -713,7 +713,7 @@ with tab_exp:
     """
     df_exp = run_df(sql, params, ["month", "month_label", "expense_outflow"])
     if not df_exp.empty:
-        show_df(df_exp, label_col=\"month_label\")
+        show_df(df_exp, label_col="month_label")
         st.line_chart(df_exp.set_index("month_label")["expense_outflow"])
         st.success(f"Total Expense Outflow: {df_exp['expense_outflow'].sum():,.0f} PKR")
     else:
@@ -764,7 +764,7 @@ with tab_cf:
     df_cf = run_df(sql, params, ["Bank", "Direction", "Amount"])
 
     if not df_cf.empty:
-        show_df(df_cf, label_col=\"Bank\")
+        show_df(df_cf, label_col="Bank")
 
         inflow = df_cf[df_cf["Direction"] == "in"]["Amount"].abs().sum()
         outflow = df_cf[df_cf["Direction"] == "out"]["Amount"].abs().sum()
@@ -892,7 +892,7 @@ with tab_rec_kpi:
     if df_pending.empty:
         st.info("No pending recoup rows under current filters.")
     else:
-        show_df(df_pending, label_col=\"Head\")
+        show_df(df_pending, label_col="Head")
 
 # ---------------- Receivables tab ----------------
 with tab_receivables:
@@ -933,7 +933,7 @@ with tab_receivables:
         st.metric("Outstanding AR", f"{outstanding:,.0f}")
 
     st.divider()
-        st.caption("Receivable Ledger (Last 1000 rows)")
+    st.caption("Receivable Ledger (Last 1000 rows)")
 
     # Schema-safe ledger SELECT list
     base_cols = ['"date"', "account", "head_name", "pay_to", "description",
