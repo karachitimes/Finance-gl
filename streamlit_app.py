@@ -99,6 +99,27 @@ def cashflow_dir_expr(rel: str, net_expr: str) -> str:
         return "direction"
     return f"case when {net_expr} >= 0 then 'out' else 'in' end"
 
+def tb_amount_expr(rel: str) -> str:
+    """Best available amount expression for trial balance."""
+    if has_column(rel, "gl_amount"):
+        return "coalesce(gl_amount,0)"
+    if has_column(rel, "net_flow"):
+        return "coalesce(net_flow,0)"
+    # signed fallback
+    return "coalesce(debit_payment,0) - coalesce(credit_deposit,0)"
+
+
+def tb_account_expr(rel: str) -> str:
+    """Best available grouping key for trial balance."""
+    if has_column(rel, "account"):
+        return "account"
+    if has_column(rel, "head_name"):
+        return "head_name"
+    if has_column(rel, "bank"):
+        return "bank"
+    return "'UNKNOWN'"
+
+
 @st.cache_data(ttl=3600)
 def get_source_relation() -> str:
     """
@@ -754,30 +775,38 @@ with tab_tb:
     where = ['"date" <= :dt']
     params = {"dt": dt}
 
-    if bank != "ALL":
+    # Apply slicers only if columns exist in REL_SEM
+    if bank != "ALL" and has_column(REL_SEM, "bank"):
         where.append("bank = :bank"); params["bank"] = bank
-    if head != "ALL":
+    if head != "ALL" and has_column(REL_SEM, "head_name"):
         where.append("head_name = :head_name"); params["head_name"] = head
-    if account != "ALL":
+    if account != "ALL" and has_column(REL_SEM, "account"):
         where.append("account = :account"); params["account"] = account
-    if func_code != "ALL":
+    if func_code != "ALL" and has_column(REL_SEM, "func_code"):
         where.append("func_code = :func_code"); params["func_code"] = func_code
+    if attribute != "ALL" and has_column(REL_SEM, "attribute"):
+        where.append("attribute = :attribute"); params["attribute"] = attribute
+
+    acct_expr = tb_account_expr(REL_SEM)
+    amt_expr = tb_amount_expr(REL_SEM)
 
     sql = f"""
     select
-      account,
-      sum(coalesce(gl_amount,0)) as balance
+      {acct_expr} as "Account",
+      sum({amt_expr}) as "Balance"
     from {REL_SEM}
     where {' and '.join(where)}
     group by 1
     order by 1
     """
-    df_tb = run_df(sql, params, ["Account", "Balance"])
+    df_tb = run_df(sql, params)
     if not df_tb.empty:
         st.dataframe(df_tb, use_container_width=True)
-        st.success(f"Net (sum of balances): {df_tb['Balance'].sum():,.0f} PKR")
+        if "Balance" in df_tb.columns:
+            st.success(f"Net (sum of balances): {df_tb['Balance'].sum():,.0f} PKR")
     else:
         st.info("No rows found for trial balance with current filters.")
+
 
 # ---------------- Recoup KPIs tab ----------------
 with tab_rec_kpi:
@@ -962,7 +991,7 @@ with tab_qa:
                 where {where_sql}
                 group by 1
                 order by 2 desc
-                limit 50
+                limit 100
                 """
                 df_out = run_df(sql, params, ["Head", "Revenue"])
                 st.dataframe(df_out, use_container_width=True)
@@ -1022,7 +1051,7 @@ with tab_qa:
                 where {where_sql}
                 group by 1
                 order by 2 desc
-                limit 50
+                limit 100
                 """
                 df_out = run_df(sql, params, ["Head", "Outflow"])
                 st.dataframe(df_out, use_container_width=True)
@@ -1072,15 +1101,18 @@ with tab_qa:
             rel = REL_SEM
             st.subheader("Trial Balance")
 
+            acct_expr = tb_account_expr(rel)
+            amt_expr = tb_amount_expr(rel)
+
             sql = f"""
-            select account,
-                   sum(coalesce(gl_amount,0)) as balance
+            select {acct_expr} as "Account",
+                   sum({amt_expr}) as "Balance"
             from {rel}
             where {where_sql}
             group by 1
             order by 1
             """
-            df_out = run_df(sql, params, ["Account", "Balance"])
+            df_out = run_df(sql, params)
             st.dataframe(df_out, use_container_width=True)
 
         elif intent == "recoup":
@@ -1101,50 +1133,45 @@ with tab_qa:
             df_out = run_df(sql, params, ["State", "Amount"])
             st.dataframe(df_out, use_container_width=True)
 
+        else:
+            rel = REL_SEM
+            st.subheader("Search results (latest rows)")
 
-else:
-    rel = REL_SEM
-    st.subheader("Search results (latest rows)")
+            term = q.strip()
+            params2 = dict(params)
+            params2["q"] = f"%{term}%"
 
-    term = q.strip()
-    params2 = dict(params)
-    params2["q"] = f"%{term}%"
+            base_cols = ['"date"', "bank", "account", "head_name", "pay_to", "description"]
+            optional_cols = [
+                "debit_payment", "credit_deposit", "gl_amount", "net_flow",
+                "bill_no", "status", "voucher_no", "reference_no", "func_code", "attribute"
+            ]
 
-    # Schema-safe select list (views may not expose gl_amount/status/etc.)
-    base_cols = ['"date"', "bank", "account", "head_name", "pay_to", "description"]
-    optional_cols = [
-        "debit_payment", "credit_deposit", "gl_amount", "net_flow",
-        "bill_no", "status", "voucher_no", "reference_no", "func_code", "attribute"
-    ]
+            select_cols = []
+            for c in base_cols:
+                if c == '"date"' or has_column(rel, c):
+                    select_cols.append(c)
+            for c in optional_cols:
+                if has_column(rel, c):
+                    select_cols.append(c)
+            if not select_cols:
+                select_cols = ['"date"', "description"]
 
-    select_cols = []
-    for c in base_cols:
-        if c == '"date"' or has_column(rel, c):
-            select_cols.append(c)
-
-    for c in optional_cols:
-        if has_column(rel, c):
-            select_cols.append(c)
-
-    # Always have at least date + description for meaningful output
-    if not select_cols:
-        select_cols = ['"date"', "description"]
-
-    sql = f"""
-    select {', '.join(select_cols)}
-    from {rel}
-    where {where_sql}
-      and (
-        coalesce(description,'') ilike :q
-        or coalesce(pay_to,'') ilike :q
-        or coalesce(account,'') ilike :q
-        or coalesce(head_name,'') ilike :q
-      )
-    order by "date" desc
-    limit 500
-    """
-    df_out = run_df(sql, params2)
-    st.dataframe(df_out, use_container_width=True)
+            sql = f"""
+            select {', '.join(select_cols)}
+            from {rel}
+            where {where_sql}
+              and (
+                coalesce(description,'') ilike :q
+                or coalesce(pay_to,'') ilike :q
+                or coalesce(account,'') ilike :q
+                or coalesce(head_name,'') ilike :q
+              )
+            order by "date" desc
+            limit 500
+            """
+            df_out = run_df(sql, params2)
+            st.dataframe(df_out, use_container_width=True)
 
         with st.expander("🔍 Debug (SQL + Params)"):
             st.write(f"Intent: `{intent}` | Effective func filter: `{effective_func}`")
