@@ -99,27 +99,6 @@ def cashflow_dir_expr(rel: str, net_expr: str) -> str:
         return "direction"
     return f"case when {net_expr} >= 0 then 'out' else 'in' end"
 
-def tb_amount_expr(rel: str) -> str:
-    """Best available amount expression for trial balance."""
-    if has_column(rel, "gl_amount"):
-        return "coalesce(gl_amount,0)"
-    if has_column(rel, "net_flow"):
-        return "coalesce(net_flow,0)"
-    # signed fallback
-    return "coalesce(debit_payment,0) - coalesce(credit_deposit,0)"
-
-
-def tb_account_expr(rel: str) -> str:
-    """Best available grouping key for trial balance."""
-    if has_column(rel, "account"):
-        return "account"
-    if has_column(rel, "head_name"):
-        return "head_name"
-    if has_column(rel, "bank"):
-        return "bank"
-    return "'UNKNOWN'"
-
-
 @st.cache_data(ttl=3600)
 def get_source_relation() -> str:
     """
@@ -464,7 +443,7 @@ def compute_powerpivot_metrics(where_sql: str, params: dict, bank_revenue: str =
     }
 
 # -------------------------------------------------
-# UI FILTERS (Top Horizontal Bar)
+# UI FILTERS
 # -------------------------------------------------
 if "filters_applied" not in st.session_state:
     st.session_state.filters_applied = False
@@ -477,29 +456,13 @@ if "filters_applied" not in st.session_state:
     st.session_state.func_code = "ALL"
     st.session_state.fy_label = "ALL"
 
-# Optional: sticky filter bar (feels like a top menu)
-st.markdown(
-    """
-<style>
-/* Make the filter form stick near the top while scrolling */
-div[data-testid="stVerticalBlockBorderWrapper"]:has(> div > div > div[data-testid="stForm"]) {
-  position: sticky;
-  top: 0.5rem;
-  z-index: 999;
-  background: white;
-  padding-top: 0.25rem;
-  padding-bottom: 0.25rem;
-  border-bottom: 1px solid rgba(0,0,0,0.08);
-}
-</style>
-""",
-    unsafe_allow_html=True,
-)
+with st.form(key="filter_form"):
+    c1, c2 = st.columns(2)
+    with c1:
+        new_df = st.date_input("From Date", value=st.session_state.df)
+    with c2:
+        new_dt = st.date_input("To Date", value=st.session_state.dt)
 
-st.markdown("### Filters")
-
-with st.form("filter_form", clear_on_submit=False):
-    # Pre-fetch distinct lists once for index lookups (cached by @st.cache_data)
     banks = ["ALL"] + get_distinct("bank")
     heads = ["ALL"] + get_distinct("head_name")
     accounts = ["ALL"] + get_distinct("account")
@@ -510,32 +473,24 @@ with st.form("filter_form", clear_on_submit=False):
     attrs_list = ["ALL"] + sorted(attributes)
     funcs = ["ALL"] + get_distinct("func_code")
 
-    # Fiscal Year options
-    years = get_distinct_years()
-    fy_options = ["ALL"] + [f"FY{y}-{(y+1)%100:02d}" for y in years]
-
-    # Indices for current selections (preserve state on rerun)
     b_idx = banks.index(st.session_state.bank) if st.session_state.bank in banks else 0
     h_idx = heads.index(st.session_state.head) if st.session_state.head in heads else 0
     a_idx = accounts.index(st.session_state.account) if st.session_state.account in accounts else 0
     attr_idx = attrs_list.index(st.session_state.attribute) if st.session_state.attribute in attrs_list else 0
     f_idx = funcs.index(st.session_state.func_code) if st.session_state.func_code in funcs else 0
+
+    new_bank = st.selectbox("Bank", banks, index=b_idx)
+    new_head = st.selectbox("Head", heads, index=h_idx)
+    new_account = st.selectbox("Account", accounts, index=a_idx)
+    new_attribute = st.selectbox("Attribute", attrs_list, index=attr_idx)
+    new_func_code = st.selectbox("Function Code", funcs, index=f_idx)
+
+    years = get_distinct_years()
+    fy_options = ["ALL"] + [f"FY{y}-{(y+1)%100:02d}" for y in years]
     fy_idx = fy_options.index(st.session_state.fy_label) if st.session_state.fy_label in fy_options else 0
+    new_fy_label = st.selectbox("Fiscal Year", fy_options, index=fy_idx)
 
-    # Row 1
-    r1 = st.columns([1, 1, 1, 1])
-    new_df = r1[0].date_input("From", value=st.session_state.df)
-    new_dt = r1[1].date_input("To", value=st.session_state.dt)
-    new_fy_label = r1[2].selectbox("Fiscal Year", fy_options, index=fy_idx)
-    new_bank = r1[3].selectbox("Bank", banks, index=b_idx)
-
-    # Row 2
-    r2 = st.columns([1, 1, 1, 1, 1])
-    new_head = r2[0].selectbox("Head", heads, index=h_idx)
-    new_account = r2[1].selectbox("Account", accounts, index=a_idx)
-    new_attribute = r2[2].selectbox("Attribute", attrs_list, index=attr_idx)
-    new_func_code = r2[3].selectbox("Func Code", funcs, index=f_idx)
-    apply_filters = r2[4].form_submit_button("Apply ✅")
+    apply_filters = st.form_submit_button("Apply Filters")
 
 if apply_filters or not st.session_state.filters_applied:
     st.session_state.filters_applied = True
@@ -548,7 +503,6 @@ if apply_filters or not st.session_state.filters_applied:
     st.session_state.func_code = new_func_code
     st.session_state.fy_label = new_fy_label
 
-# Read filter values from session state
 df = st.session_state.df
 dt = st.session_state.dt
 bank = st.session_state.bank
@@ -775,38 +729,30 @@ with tab_tb:
     where = ['"date" <= :dt']
     params = {"dt": dt}
 
-    # Apply slicers only if columns exist in REL_SEM
-    if bank != "ALL" and has_column(REL_SEM, "bank"):
+    if bank != "ALL":
         where.append("bank = :bank"); params["bank"] = bank
-    if head != "ALL" and has_column(REL_SEM, "head_name"):
+    if head != "ALL":
         where.append("head_name = :head_name"); params["head_name"] = head
-    if account != "ALL" and has_column(REL_SEM, "account"):
+    if account != "ALL":
         where.append("account = :account"); params["account"] = account
-    if func_code != "ALL" and has_column(REL_SEM, "func_code"):
+    if func_code != "ALL":
         where.append("func_code = :func_code"); params["func_code"] = func_code
-    if attribute != "ALL" and has_column(REL_SEM, "attribute"):
-        where.append("attribute = :attribute"); params["attribute"] = attribute
-
-    acct_expr = tb_account_expr(REL_SEM)
-    amt_expr = tb_amount_expr(REL_SEM)
 
     sql = f"""
     select
-      {acct_expr} as "Account",
-      sum({amt_expr}) as "Balance"
+      account,
+      sum(coalesce(gl_amount,0)) as balance
     from {REL_SEM}
     where {' and '.join(where)}
     group by 1
     order by 1
     """
-    df_tb = run_df(sql, params)
+    df_tb = run_df(sql, params, ["Account", "Balance"])
     if not df_tb.empty:
         st.dataframe(df_tb, use_container_width=True)
-        if "Balance" in df_tb.columns:
-            st.success(f"Net (sum of balances): {df_tb['Balance'].sum():,.0f} PKR")
+        st.success(f"Net (sum of balances): {df_tb['Balance'].sum():,.0f} PKR")
     else:
         st.info("No rows found for trial balance with current filters.")
-
 
 # ---------------- Recoup KPIs tab ----------------
 with tab_rec_kpi:
@@ -893,29 +839,30 @@ with tab_receivables:
     st.divider()
     st.caption("Receivable Ledger (Last 1000 rows)")
 
-    # Schema-safe ledger SELECT list (REL_AR may be v_receivable OR fallback to REL_SEM)
-base_cols = ['"date"', "account", "head_name", "pay_to", "description",
-            "debit_payment", "credit_deposit", "gl_amount", "bill_no"]
-optional_cols = ["voucher_no", "reference_no", "status", "bank", "func_code", "attribute", "net_flow"]
-
-select_cols = []
-for c in base_cols:
-    if c == '"date"' or has_column(REL_AR, c):
-        select_cols.append(c)
-for c in optional_cols:
-    if has_column(REL_AR, c):
-        select_cols.append(c)
-
-ledger_sql = f"""
-select {', '.join(select_cols)}
-from {REL_AR}
-where {where_clause}
-  and func_code in ('AGR','AMC','PAR','WAR')
-order by "date" desc
-limit 1000
-"""
-df_ledger = run_df(ledger_sql, params_base)
-st.dataframe(df_ledger, use_container_width=True)
+    ledger_sql = f"""
+    select
+      "date",
+      account,
+      head_name,
+      pay_to,
+      description,
+      debit_payment,
+      credit_deposit,
+      gl_amount,
+      bill_no,
+      voucher_no,
+      reference_no
+    from {REL_AR}
+    where {where_clause}
+      and func_code in ('AGR','AMC','PAR','WAR')
+    order by "date" desc
+    limit 1000
+    """
+    df_ledger = run_df(
+        ledger_sql, params_base,
+        ["date","account","head_name","pay_to","description","debit_payment","credit_deposit","gl_amount","bill_no","voucher_no","reference_no"]
+    )
+    st.dataframe(df_ledger, use_container_width=True)
 
 # ---------------- AI Q&A tab ----------------
 with tab_qa:
@@ -990,7 +937,7 @@ with tab_qa:
                 where {where_sql}
                 group by 1
                 order by 2 desc
-                limit 100
+                limit 50
                 """
                 df_out = run_df(sql, params, ["Head", "Revenue"])
                 st.dataframe(df_out, use_container_width=True)
@@ -1050,7 +997,7 @@ with tab_qa:
                 where {where_sql}
                 group by 1
                 order by 2 desc
-                limit 100
+                limit 50
                 """
                 df_out = run_df(sql, params, ["Head", "Outflow"])
                 st.dataframe(df_out, use_container_width=True)
@@ -1100,18 +1047,15 @@ with tab_qa:
             rel = REL_SEM
             st.subheader("Trial Balance")
 
-            acct_expr = tb_account_expr(rel)
-            amt_expr = tb_amount_expr(rel)
-
             sql = f"""
-            select {acct_expr} as "Account",
-                   sum({amt_expr}) as "Balance"
+            select account,
+                   sum(coalesce(gl_amount,0)) as balance
             from {rel}
             where {where_sql}
             group by 1
             order by 1
             """
-            df_out = run_df(sql, params)
+            df_out = run_df(sql, params, ["Account", "Balance"])
             st.dataframe(df_out, use_container_width=True)
 
         elif intent == "recoup":
@@ -1139,25 +1083,9 @@ with tab_qa:
             term = q.strip()
             params2 = dict(params)
             params2["q"] = f"%{term}%"
-
-            base_cols = ['"date"', "bank", "account", "head_name", "pay_to", "description"]
-            optional_cols = [
-                "debit_payment", "credit_deposit", "gl_amount", "net_flow",
-                "bill_no", "status", "voucher_no", "reference_no", "func_code", "attribute"
-            ]
-
-            select_cols = []
-            for c in base_cols:
-                if c == '"date"' or has_column(rel, c):
-                    select_cols.append(c)
-            for c in optional_cols:
-                if has_column(rel, c):
-                    select_cols.append(c)
-            if not select_cols:
-                select_cols = ['"date"', "description"]
-
             sql = f"""
-            select {', '.join(select_cols)}
+            select "date", bank, account, head_name, pay_to, description,
+                   debit_payment, credit_deposit, gl_amount, bill_no, status
             from {rel}
             where {where_sql}
               and (
@@ -1169,7 +1097,11 @@ with tab_qa:
             order by "date" desc
             limit 500
             """
-            df_out = run_df(sql, params2)
+            df_out = run_df(
+                sql, params2,
+                ["date","bank","account","head_name","pay_to","description",
+                 "debit_payment","credit_deposit","gl_amount","bill_no","status"]
+            )
             st.dataframe(df_out, use_container_width=True)
 
         with st.expander("🔍 Debug (SQL + Params)"):
@@ -1191,27 +1123,45 @@ with tab_search:
     )
     where_sql = " and ".join(where) if where else "1=1"
 
-    if term.strip():
-        params["q"] = f"%{term.strip()}%"
-        sql = f"""
-        select
-          "date", bank, account, attribute, func_code, head_name, pay_to, description,
-          debit_payment, credit_deposit, gl_amount, net_flow,
-          bill_no, status
-        from {REL_SEM}
-        where {where_sql}
-          and (
-            coalesce(description,'') ilike :q
-            or coalesce(pay_to,'') ilike :q
-            or coalesce(account,'') ilike :q
-            or coalesce(head_name,'') ilike :q
-          )
-        order by "date" desc
-        limit {int(limit)}
-        """
-        df_s = run_df(sql, params)
-        if not df_s.empty and "net_flow" in df_s.columns:
+if term.strip():
+    params["q"] = f"%{term.strip()}%"
+
+    # Schema-safe select list (REL_SEM may be a view without all columns)
+    base_cols = ['"date"', "bank", "account", "head_name", "pay_to", "description"]
+    optional_cols = ["attribute", "func_code", "debit_payment", "credit_deposit", "gl_amount", "net_flow", "bill_no", "status"]
+
+    select_cols = []
+    for c in base_cols:
+        if c == '"date"' or has_column(REL_SEM, c):
+            select_cols.append(c)
+    for c in optional_cols:
+        if has_column(REL_SEM, c):
+            select_cols.append(c)
+    if not select_cols:
+        select_cols = ['"date"', "description"]
+
+    sql = f"""
+    select {', '.join(select_cols)}
+    from {REL_SEM}
+    where {where_sql}
+      and (
+        coalesce(description,'') ilike :q
+        or coalesce(pay_to,'') ilike :q
+        or coalesce(account,'') ilike :q
+        or coalesce(head_name,'') ilike :q
+      )
+    order by "date" desc
+    limit {int(limit)}
+    """
+    df_s = run_df(sql, params)
+
+    # Net effect caption (if available)
+    if not df_s.empty:
+        if "net_flow" in df_s.columns:
             st.caption(f"Net effect (sum net_flow): {df_s['net_flow'].sum():,.0f}")
-        st.dataframe(df_s, use_container_width=True)
-    else:
-        st.info("Enter a search term to show results.")
+        elif "gl_amount" in df_s.columns:
+            st.caption(f"Net effect (sum gl_amount): {df_s['gl_amount'].sum():,.0f}")
+
+    show_df(df_s)
+else:
+    st.info("Enter a search term to show results.")
