@@ -1,5 +1,6 @@
 import streamlit as st
 import pandas as pd
+import numpy as np
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import OperationalError
 from datetime import date
@@ -372,6 +373,60 @@ def run_df(sql: str, params: dict, columns: list[str] | None = None) -> pd.DataF
         out.columns = columns
     return out
 
+
+# -------------------------------------------------
+# DATAFRAME DISPLAY HELPERS (Totals everywhere)
+# -------------------------------------------------
+def add_totals_table(df: pd.DataFrame, label_col: str | None = None, total_label: str = "TOTAL") -> pd.DataFrame:
+    """Append a totals row for all numeric columns."""
+    if df is None or df.empty:
+        return df
+    out = df.copy()
+    num_cols = out.select_dtypes(include=[np.number]).columns.tolist()
+    if not num_cols:
+        return out
+
+    total_row = {c: "" for c in out.columns}
+    for c in num_cols:
+        total_row[c] = float(pd.to_numeric(out[c], errors="coerce").fillna(0).sum())
+
+    if label_col and label_col in out.columns:
+        total_row[label_col] = total_label
+    else:
+        for c in out.columns:
+            if c not in num_cols:
+                total_row[c] = total_label
+                break
+
+    return pd.concat([out, pd.DataFrame([total_row])], ignore_index=True)
+
+
+def add_totals_pivot(pivot: pd.DataFrame, total_label: str = "TOTAL") -> pd.DataFrame:
+    """Add row totals + column totals + grand total to a pivot/cube."""
+    if pivot is None or pivot.empty:
+        return pivot
+    out = pivot.copy()
+    out = out.apply(pd.to_numeric, errors="coerce").fillna(0)
+    out[total_label] = out.sum(axis=1)
+    total_row = out.sum(axis=0).to_frame().T
+    total_row.index = [total_label]
+    return pd.concat([out, total_row], axis=0)
+
+
+def show_df(df: pd.DataFrame, *, label_col: str | None = None):
+    if df is None or df.empty:
+        st.info("No rows for selected filters.")
+        return
+    st.dataframe(add_totals_table(df, label_col=label_col), use_container_width=True)
+
+
+def show_pivot(pivot: pd.DataFrame):
+    if pivot is None or pivot.empty:
+        st.info("No rows for selected filters.")
+        return
+    st.dataframe(add_totals_pivot(pivot), use_container_width=True)
+
+
 # -------------------------------------------------
 # POWERPIVOT / DAX EQUIVALENT METRICS (SQL)
 # -------------------------------------------------
@@ -579,7 +634,7 @@ with tab_rev:
     order by 1
     """
     df_rev = run_df(sql_month, params, ["month_start", "month_label", "revenue_amount"])
-    st.dataframe(df_rev, use_container_width=True)
+    show_df(df_rev, label_col=\"month_label\")
 
     st.divider()
     st.caption("Monthly Revenue by Head (Pivot) — Head rows × Month columns")
@@ -604,7 +659,7 @@ with tab_rev:
             aggfunc="sum",
             fill_value=0,
         )
-        st.dataframe(cube, use_container_width=True)
+        show_pivot(cube)
     else:
         st.info("No revenue data for selected filters.")
 
@@ -658,7 +713,7 @@ with tab_exp:
     """
     df_exp = run_df(sql, params, ["month", "month_label", "expense_outflow"])
     if not df_exp.empty:
-        st.dataframe(df_exp, use_container_width=True)
+        show_df(df_exp, label_col=\"month_label\")
         st.line_chart(df_exp.set_index("month_label")["expense_outflow"])
         st.success(f"Total Expense Outflow: {df_exp['expense_outflow'].sum():,.0f} PKR")
     else:
@@ -679,7 +734,7 @@ with tab_exp:
     df_exp_p = run_df(sql_exp_pivot, params, ["month_label", "head_name", "outflow"])
     if not df_exp_p.empty:
         cube = df_exp_p.pivot_table(index="head_name", columns="month_label", values="outflow", aggfunc="sum", fill_value=0)
-        st.dataframe(cube, use_container_width=True)
+        show_pivot(cube)
 
 # ---------------- Cashflow tab ----------------
 with tab_cf:
@@ -709,7 +764,7 @@ with tab_cf:
     df_cf = run_df(sql, params, ["Bank", "Direction", "Amount"])
 
     if not df_cf.empty:
-        st.dataframe(df_cf, use_container_width=True)
+        show_df(df_cf, label_col=\"Bank\")
 
         inflow = df_cf[df_cf["Direction"] == "in"]["Amount"].abs().sum()
         outflow = df_cf[df_cf["Direction"] == "out"]["Amount"].abs().sum()
@@ -749,7 +804,7 @@ with tab_cf:
             aggfunc="sum",
             fill_value=0,
         )
-        st.dataframe(cube, use_container_width=True)
+        show_pivot(cube)
     else:
         st.info("No cashflow rows for pivot under current filters.")
 
@@ -837,7 +892,7 @@ with tab_rec_kpi:
     if df_pending.empty:
         st.info("No pending recoup rows under current filters.")
     else:
-        st.dataframe(df_pending, use_container_width=True)
+        show_df(df_pending, label_col=\"Head\")
 
 # ---------------- Receivables tab ----------------
 with tab_receivables:
@@ -878,33 +933,35 @@ with tab_receivables:
         st.metric("Outstanding AR", f"{outstanding:,.0f}")
 
     st.divider()
-    st.caption("Receivable Ledger (Last 1000 rows)")
+        st.caption("Receivable Ledger (Last 1000 rows)")
+
+    # Schema-safe ledger SELECT list
+    base_cols = ['"date"', "account", "head_name", "pay_to", "description",
+                 "debit_payment", "credit_deposit", "gl_amount", "net_flow", "bill_no"]
+    optional_cols = ["voucher_no", "reference_no", "status", "bank", "func_code", "attribute"]
+
+    select_cols = []
+    for c in base_cols:
+        if c == '"date"' or has_column(REL_AR, c):
+            select_cols.append(c)
+    for c in optional_cols:
+        if has_column(REL_AR, c):
+            select_cols.append(c)
+
+    ar_filter = ""
+    if has_column(REL_AR, "func_code"):
+        ar_filter = "and func_code in ('AGR','AMC','PAR','WAR')"
 
     ledger_sql = f"""
-    select
-      "date",
-      account,
-      head_name,
-      pay_to,
-      description,
-      debit_payment,
-      credit_deposit,
-      gl_amount,
-      bill_no,
-      voucher_no,
-      reference_no
+    select {', '.join(select_cols)}
     from {REL_AR}
     where {where_clause}
-      and func_code in ('AGR','AMC','PAR','WAR')
+      {ar_filter}
     order by "date" desc
     limit 1000
     """
     df_ledger = run_df(ledger_sql, params_base)
-if "show_df" in globals():
     show_df(df_ledger)
-else:
-    st.dataframe(df_ledger, use_container_width=True)
-
 
 # ---------------- AI Q&A tab ----------------
 with tab_qa:
@@ -925,7 +982,7 @@ with tab_qa:
             func_override=func_override,
         )
 
-        # Override date filter if question specifies relative dates
+        # Relative date overrides
         date_sql, date_params = infer_date_sql(q)
         if date_sql:
             where = [w for w in where if "between :df and :dt" not in w and '"date" between' not in w]
@@ -966,7 +1023,7 @@ with tab_qa:
                     pv = df_out.pivot_table(index="Head", columns="Month", values="Revenue", aggfunc="sum", fill_value=0)
                     pv = pv.reindex(sorted(pv.columns), axis=1)
                     pv.columns = [d.strftime("%b-%y") for d in pv.columns]
-                    st.dataframe(pv.reset_index().rename(columns={"Head": "Head Name"}), use_container_width=True)
+                    show_pivot(pv)
                 else:
                     st.warning("No rows found.")
 
@@ -982,7 +1039,7 @@ with tab_qa:
                 limit 50
                 """
                 df_out = run_df(sql, params, ["Head", "Revenue"])
-                st.dataframe(df_out, use_container_width=True)
+                show_df(df_out, label_col="Head")
 
             elif struct["monthly"]:
                 st.subheader("Monthly Revenue")
@@ -996,7 +1053,7 @@ with tab_qa:
                 order by 1
                 """
                 df_out = run_df(sql, params, ["Month", "Month Label", "Revenue"])
-                st.dataframe(df_out, use_container_width=True)
+                show_df(df_out, label_col="Month Label")
 
             else:
                 sql = f"""
@@ -1008,7 +1065,6 @@ with tab_qa:
 
         elif intent == "expense":
             rel = REL_EXP
-
             exp_expr = expense_amount_expr(rel)
 
             if struct["by_head"] and struct["monthly"]:
@@ -1028,7 +1084,7 @@ with tab_qa:
                     pv = df_out.pivot_table(index="Head", columns="Month", values="Outflow", aggfunc="sum", fill_value=0)
                     pv = pv.reindex(sorted(pv.columns), axis=1)
                     pv.columns = [d.strftime("%b-%y") for d in pv.columns]
-                    st.dataframe(pv.reset_index().rename(columns={"Head": "Head Name"}), use_container_width=True)
+                    show_pivot(pv)
                 else:
                     st.warning("No rows found.")
 
@@ -1044,7 +1100,7 @@ with tab_qa:
                 limit 50
                 """
                 df_out = run_df(sql, params, ["Head", "Outflow"])
-                st.dataframe(df_out, use_container_width=True)
+                show_df(df_out, label_col="Head")
 
             elif struct["monthly"]:
                 st.subheader("Monthly Expense")
@@ -1058,7 +1114,7 @@ with tab_qa:
                 order by 1
                 """
                 df_out = run_df(sql, params, ["Month", "Month Label", "Outflow"])
-                st.dataframe(df_out, use_container_width=True)
+                show_df(df_out, label_col="Month Label")
 
             else:
                 sql = f"""
@@ -1085,7 +1141,7 @@ with tab_qa:
             order by 1,2
             """
             df_out = run_df(sql, params, ["Bank", "Direction", "Amount"])
-            st.dataframe(df_out, use_container_width=True)
+            show_df(df_out, label_col="Bank")
 
         elif intent == "trial_balance":
             rel = REL_SEM
@@ -1096,78 +1152,75 @@ with tab_qa:
 
             sql = f"""
             select {acct_expr} as "Account",
-                sum({amt_expr}) as "Balance"
+                   sum({amt_expr}) as "Balance"
             from {rel}
             where {where_sql}
             group by 1
             order by 1
             """
             df_out = run_df(sql, params)
-            if "show_df" in globals():
-                show_df(df_out, label_col="Account")
-            else:
-                st.dataframe(df_out, use_container_width=True)
+            show_df(df_out, label_col="Account")
 
-    elif intent == "recoup":
-                rel = REL_SEM
-                st.subheader("Recoup (Pending vs Completed)")
+        elif intent == "recoup":
+            rel = REL_SEM
+            st.subheader("Recoup (Pending vs Completed)")
 
-                sql = f"""
-                select
-                case when {_is_blank_sql('status')} then 'pending' else 'completed' end as recoup_state,
-                coalesce(sum(coalesce(debit_payment,0) - coalesce(credit_deposit,0)),0) as amount
-                from {rel}
-                where {where_sql}
-                and bill_no ilike '%recoup%'
-                and coalesce(account,'') <> coalesce(bank,'')
-                group by 1
-                order by 1
-                """
-                df_out = run_df(sql, params, ["State", "Amount"])
-                st.dataframe(df_out, use_container_width=True)
+            sql = f"""
+            select
+              case when {_is_blank_sql('status')} then 'pending' else 'completed' end as recoup_state,
+              coalesce(sum(coalesce(debit_payment,0) - coalesce(credit_deposit,0)),0) as amount
+            from {rel}
+            where {where_sql}
+              and bill_no ilike '%recoup%'
+              and coalesce(account,'') <> coalesce(bank,'')
+            group by 1
+            order by 1
+            """
+            df_out = run_df(sql, params, ["State", "Amount"])
+            show_df(df_out, label_col="State")
 
-    else:
-        rel = REL_SEM
-        st.subheader("Search results (latest rows)")
+        else:
+            rel = REL_SEM
+            st.subheader("Search results (latest rows)")
 
-        term = q.strip()
-        params2 = dict(params)
-        params2["q"] = f"%{term}%"
+            term = q.strip()
+            params2 = dict(params)
+            params2["q"] = f"%{term}%"
 
-        base_cols = ['"date"', "bank", "account", "head_name", "pay_to", "description"]
-        optional_cols = ["debit_payment", "credit_deposit", "gl_amount", "net_flow", "bill_no", "status",
-                        "voucher_no", "reference_no", "func_code", "attribute"]
+            base_cols = ['"date"', "bank", "account", "head_name", "pay_to", "description"]
+            optional_cols = ["debit_payment", "credit_deposit", "gl_amount", "net_flow", "bill_no", "status",
+                             "voucher_no", "reference_no", "func_code", "attribute"]
 
-        select_cols = []
-        for c in base_cols:
-            if c == '"date"' or has_column(rel, c):
-                select_cols.append(c)
-        for c in optional_cols:
-            if has_column(rel, c):
-                select_cols.append(c)
-        if not select_cols:
-            select_cols = ['"date"', "description"]
+            select_cols = []
+            for c in base_cols:
+                if c == '"date"' or has_column(rel, c):
+                    select_cols.append(c)
+            for c in optional_cols:
+                if has_column(rel, c):
+                    select_cols.append(c)
+            if not select_cols:
+                select_cols = ['"date"', "description"]
 
-        sql = f"""
-        select {', '.join(select_cols)}
-        from {rel}
-        where {where_sql}
-        and (
-            coalesce(description,'') ilike :q
-            or coalesce(pay_to,'') ilike :q
-            or coalesce(account,'') ilike :q
-            or coalesce(head_name,'') ilike :q
-        )
-        order by "date" desc
-        limit 500
-        """
-        df_out = run_df(sql, params2)
-        st.dataframe(df_out, use_container_width=True)
+            sql = f"""
+            select {', '.join(select_cols)}
+            from {rel}
+            where {where_sql}
+              and (
+                coalesce(description,'') ilike :q
+                or coalesce(pay_to,'') ilike :q
+                or coalesce(account,'') ilike :q
+                or coalesce(head_name,'') ilike :q
+              )
+            order by "date" desc
+            limit 500
+            """
+            df_out = run_df(sql, params2)
+            show_df(df_out)
 
-    with st.expander("🔍 Debug (SQL + Params)"):
-                st.write(f"Intent: `{intent}` | Effective func filter: `{effective_func}`")
-                st.code(where_sql)
-                st.json({k: (v.isoformat() if hasattr(v, "isoformat") else v) for k, v in params.items()})
+        with st.expander("🔍 Debug (SQL + Params)"):
+            st.write(f"Intent: `{intent}` | Effective func filter: `{effective_func}`")
+            st.code(where_sql)
+            st.json({k: (v.isoformat() if hasattr(v, "isoformat") else v) for k, v in params.items()})
 
 
 # ---------------- Search Description tab ----------------
