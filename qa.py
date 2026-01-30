@@ -137,7 +137,7 @@ def parse_as_of_date(q: str) -> date | None:
     return None
 
 def parse_field_search(q: str) -> tuple[str | None, str | None]:
-    m = re.search(r"\bsearch\s+(voucher_no|reference_no|bill_no|status|account|bank|head_name|pay_to)\s+(.+)$", q.strip(), flags=re.I)
+    m = re.search(r"\bsearch\s+(folio_chq_no|bill_no|status|account|bank|head_name|pay_to)\s+(.+)$", q.strip(), flags=re.I)
     if not m:
         return None, None
     return m.group(1).lower(), m.group(2).strip()
@@ -406,8 +406,7 @@ def render_qa_tab(engine, f, *, rel: str):
                     pay_to,
                     bill_no,
                     status,
-                    voucher_no,
-                    reference_no,
+                    folio_chq_no,
                     (coalesce(debit_payment,0) - coalesce(credit_deposit,0)) as amount,
                     (current_date - "date") as age_days
                 from {rel0}
@@ -429,7 +428,7 @@ def render_qa_tab(engine, f, *, rel: str):
             sql = f"""
                 select
                     "date", bank, account, head_name, pay_to,
-                    voucher_no, reference_no, bill_no, status,
+                    folio_chq_no, bill_no, status,
                     coalesce(debit_payment,0) as debit_payment,
                     coalesce(credit_deposit,0) as credit_deposit,
                     description
@@ -452,7 +451,7 @@ def render_qa_tab(engine, f, *, rel: str):
             sql = f"""
                 select
                     "date", bank, account, pay_to,
-                    head_name, voucher_no, reference_no,
+                    head_name, bill_no, folio_chq_no,
                     {exp_expr} as amount,
                     description
                 from {rele}
@@ -662,7 +661,7 @@ def render_qa_tab(engine, f, *, rel: str):
         """
 
     base_cols = ['"date"', "bank", "account", "head_name", "pay_to", "description"]
-    optional_cols = ["debit_payment", "credit_deposit", "gl_amount", "net_flow", "bill_no", "status", "voucher_no", "reference_no", "func_code", "attribute"]
+    optional_cols = ["debit_payment", "credit_deposit", "gl_amount", "net_flow", "bill_no", "status", "folio_chq_no", "func_code", "attribute"]
     select_cols = []
     for c in base_cols:
         if c == '"date"' or has_column(engine, rel0, c):
