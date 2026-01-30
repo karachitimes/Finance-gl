@@ -21,8 +21,8 @@ def show_df(df: pd.DataFrame, *, label_col: str | None = None, total_label: str 
                     total_row[c] = total_label
                     break
         out = pd.concat([out, pd.DataFrame([total_row])], ignore_index=True)
+    # Streamlit is deprecating use_container_width after 2025-12-31
     st.dataframe(out, width="stretch")
-
 
 def show_pivot(pivot: pd.DataFrame, total_label: str = "TOTAL"):
     if pivot is None or pivot.empty:
@@ -34,4 +34,3 @@ def show_pivot(pivot: pd.DataFrame, total_label: str = "TOTAL"):
     total_row.index = [total_label]
     out = pd.concat([out, total_row], axis=0)
     st.dataframe(out, width="stretch")
-
