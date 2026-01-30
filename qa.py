@@ -61,7 +61,12 @@ def _norm(s: str) -> str:
 
 def not_recoup_filter(q: str) -> bool:
     t = _norm(q)
-    return ("not recoup" in t) or ("exclude recoup" in t) or ("without recoup" in t) or ("bill_no not recoup" in t)
+    return (
+        ("not recoup" in t)
+        or ("exclude recoup" in t)
+        or ("without recoup" in t)
+        or ("bill_no not recoup" in t)
+    )
 
 
 def parse_pay_to(q: str) -> str | None:
@@ -252,6 +257,11 @@ def render_qa_tab(engine, f, *, rel: str):
         f["df"], f["dt"], f["bank"], f["head"], f["account"], f["attribute"], f["func_code"],
         fy_label=f["fy_label"], func_override=func_override
     )
+    # pay_to filter from question text (deterministic)
+    pay_to_name = parse_pay_to(q)
+    if pay_to_name:
+        where.append("pay_to ilike :pay_to_name")
+        params["pay_to_name"] = f"%{pay_to_name}%"
 
     # "as of" date for trial balance
     asof = parse_as_of_date(q)
