@@ -60,7 +60,10 @@ def build_where_from_ui(
     *, fy_label: str | None = None, func_override=USE_UI
 ):
     where = []
-    params: dict[str, object] = {}
+    params: dict\[str, object\] = \{\}
+
+    # Defensive: normalize None to 'ALL' (keeps behavior unchanged)
+    func_code = func_code or "ALL"
 
     if fy_label and fy_label != "ALL":
         try:
