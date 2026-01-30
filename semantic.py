@@ -1,83 +1,99 @@
 import streamlit as st
-from sqlalchemy import text
 from datetime import date
+from sqlalchemy import text
 
-# -------------------------------------------------
-# RELATIONS (prefer views when available)
-# -------------------------------------------------
+from db import get_engine
+
+# -----------------------------
+# Relations (views)
+# -----------------------------
 REL_SEM = "public.v_finance_semantic"
 REL_REV = "public.v_revenue"
 REL_EXP = "public.v_expense"
-REL_CF  = "public.v_cashflow"
 REL_AR  = "public.v_receivable"
+REL_CF  = "public.v_cashflow"
 
-RECoup_START_DATE = date(2025, 7, 1)
+# Recoup constants used by recoup.py (keep defaults consistent with your earlier app)
+RECoup_START_DATE = date(2010, 1, 1)
 BANK_REVENUE_DEFAULT = "Revenue:4069284635"
-BANK_ASSIGNMENT_DEFAULT = "Assignment Account 1169255177"
+BANK_ASSIGNMENT_DEFAULT = "RM:4069284626"  # keep existing default; user can edit in UI
 
-@st.cache_data(ttl=3600)
-def relation_exists(engine, rel: str) -> bool:
+
+# -------------------------------------------------
+# Source relation detection (schema-safe)
+# IMPORTANT: cache_data must not receive SQLAlchemy engine
+# -------------------------------------------------
+@st.cache_data(ttl=300)
+def get_source_relation_cached() -> str:
+    engine = get_engine()
     with engine.connect() as conn:
         try:
-            conn.execute(text(f"SELECT 1 FROM {rel} LIMIT 1"))
-            return True
-        except Exception:
-            return False
-
-@st.cache_data(ttl=3600)
-def pick_view(engine, preferred: str, fallback: str) -> str:
-    return preferred if relation_exists(engine, preferred) else fallback
-
-@st.cache_data(ttl=3600)
-def get_source_relation(engine) -> str:
-    """Prefer semantic view if it exists; otherwise fall back to raw table."""
-    with engine.connect() as conn:
-        try:
-            conn.execute(text(f"SELECT 1 FROM {REL_SEM} LIMIT 1"))
+            conn.execute(text(f"select 1 from {REL_SEM} limit 1"))
             return REL_SEM
         except Exception:
             return "public.gl_register"
 
-@st.cache_data(ttl=3600)
-def has_column(engine, rel: str, col: str) -> bool:
-    if "." in rel:
-        schema, name = rel.split(".", 1)
-    else:
-        schema, name = "public", rel
-    with engine.connect() as conn:
-        q = text("""
-            select 1
-            from information_schema.columns
-            where table_schema = :schema
-              and table_name = :name
-              and column_name = :col
-            limit 1
-        """)
-        return conn.execute(q, {"schema": schema, "name": name, "col": col}).scalar() is not None
+def get_source_relation(engine) -> str:
+    # Keep signature so callers don't change; engine intentionally unused here.
+    return get_source_relation_cached()
 
+
+# -------------------------------------------------
+# View picker: prefer a specialized view if it exists, else fallback to base
+# -------------------------------------------------
+def pick_view(engine, preferred_rel: str, fallback_rel: str) -> str:
+    try:
+        with engine.connect() as conn:
+            conn.execute(text(f"select 1 from {preferred_rel} limit 1"))
+        return preferred_rel
+    except Exception:
+        return fallback_rel
+
+
+# -------------------------------------------------
+# Schema helpers
+# -------------------------------------------------
+@st.cache_data(ttl=3600)
+def _columns_cached(rel: str) -> set[str]:
+    engine = get_engine()
+    schema, table = rel.split(".", 1) if "." in rel else ("public", rel)
+    sql = text("""
+        select column_name
+        from information_schema.columns
+        where table_schema = :schema and table_name = :table
+    """)
+    with engine.connect() as conn:
+        rows = conn.execute(sql, {"schema": schema, "table": table}).fetchall()
+    return {r[0] for r in rows}
+
+def has_column(engine, rel: str, col: str) -> bool:
+    # engine unused; kept for compatibility
+    return col in _columns_cached(rel)
+
+
+# -------------------------------------------------
+# Amount expressions (avoid missing-column crashes)
+# -------------------------------------------------
 def expense_amount_expr(engine, rel: str) -> str:
+    # Prefer net_flow when available, else debit-credit
     if has_column(engine, rel, "net_flow"):
-        return "greatest(coalesce(net_flow,0),0)"
-    if has_column(engine, rel, "gl_amount"):
-        return "greatest(coalesce(gl_amount,0),0)"
-    return "greatest(coalesce(debit_payment,0) - coalesce(credit_deposit,0),0)"
+        return "coalesce(net_flow,0)"
+    # fallback
+    return "(coalesce(debit_payment,0) - coalesce(credit_deposit,0))"
 
 def cashflow_net_expr(engine, rel: str) -> str:
     if has_column(engine, rel, "net_flow"):
         return "coalesce(net_flow,0)"
-    if has_column(engine, rel, "gl_amount"):
-        return "coalesce(gl_amount,0)"
     return "(coalesce(debit_payment,0) - coalesce(credit_deposit,0))"
 
 def cashflow_dir_expr(engine, rel: str, net_expr: str) -> str:
+    # Use direction column if present (v_cashflow), else derive from net
     if has_column(engine, rel, "direction"):
         return "direction"
-    return f"(case when {net_expr} >= 0 then 'out' else 'in' end)"
+    return f"(case when ({net_expr}) >= 0 then 'out' else 'in' end)"
 
 def tb_amount_expr(engine, rel: str) -> str:
-    # prefer gl_amount if present, else net_flow, else debit-credit
-    if has_column(engine, rel, "gl_amount"):
-        return "coalesce(gl_amount,0)"
+    # Trial balance uses net flow logic
     if has_column(engine, rel, "net_flow"):
         return "coalesce(net_flow,0)"
     return "(coalesce(debit_payment,0) - coalesce(credit_deposit,0))"

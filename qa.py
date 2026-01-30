@@ -4,24 +4,40 @@ import calendar
 import re
 from datetime import date
 from difflib import get_close_matches
+from sqlalchemy import text
 
-from db import run_df, run_scalar
-from semantic import RECoup_START_DATE, get_source_relation
-from semantic import has_column, expense_amount_expr, cashflow_net_expr, cashflow_dir_expr, tb_amount_expr
+from db import run_df, run_scalar, get_engine
+from semantic import RECoup_START_DATE
+from semantic import expense_amount_expr, cashflow_net_expr, cashflow_dir_expr, tb_amount_expr
 from filters import build_where_from_ui, USE_UI
 from utils import show_df, show_pivot
 
 MONTHS = {m.lower(): i for i, m in enumerate(calendar.month_name) if m}
 
+# -----------------------------
+# Cached lists (DO NOT accept engine)
+# -----------------------------
 @st.cache_data(ttl=3600)
+def get_known_payees_cached(rel: str):
+    engine = get_engine()
+    q = text(f"select distinct pay_to from {rel} where pay_to is not null order by 1")
+    with engine.connect() as conn:
+        return [str(r[0]) for r in conn.execute(q).fetchall()]
+
 def get_known_payees(engine, rel: str):
-    from filters import get_distinct
-    return get_distinct(engine, rel, "pay_to")
+    # keep signature; engine unused
+    return get_known_payees_cached(rel)
 
 @st.cache_data(ttl=3600)
+def get_known_func_codes_cached(rel: str):
+    engine = get_engine()
+    q = text(f"select distinct func_code from {rel} where func_code is not null order by 1")
+    with engine.connect() as conn:
+        return [str(r[0]) for r in conn.execute(q).fetchall()]
+
 def get_known_func_codes(engine, rel: str):
-    from filters import get_distinct
-    return get_distinct(engine, rel, "func_code")
+    return get_known_func_codes_cached(rel)
+
 
 def best_payee_match(name: str | None, known_payees: list[str]):
     if not name:
@@ -31,6 +47,7 @@ def best_payee_match(name: str | None, known_payees: list[str]):
         return None
     matches = get_close_matches(name.title(), known_payees, n=1, cutoff=0.75)
     return matches[0] if matches else None
+
 
 def detect_intent(q: str) -> str:
     ql = q.lower()
@@ -46,6 +63,7 @@ def detect_intent(q: str) -> str:
         return "expense"
     return "search"
 
+
 def detect_structure(q: str):
     ql = q.lower()
     return {
@@ -54,6 +72,7 @@ def detect_structure(q: str):
         "monthly": ("monthly" in ql) or ("per month" in ql) or ("month wise" in ql) or ("month-wise" in ql) or ("trend" in ql),
         "top": ("top" in ql) or ("highest" in ql) or ("largest" in ql),
     }
+
 
 def parse_month_range(q: str, default_year: int | None = None):
     ql = q.lower()
@@ -70,15 +89,27 @@ def parse_month_range(q: str, default_year: int | None = None):
         return start, end_excl
     return None, None
 
+
 def infer_date_sql(q: str):
     ql = q.lower()
     if "last month" in ql:
-        return (""""date" >= date_trunc('month', current_date) - interval '1 month'
-and "date" <  date_trunc('month', current_date)""", {})
+        return (
+            """
+            "date" >= date_trunc('month', current_date) - interval '1 month'
+            and "date" <  date_trunc('month', current_date)
+            """.strip(),
+            {}
+        )
     if "this month" in ql:
-        return (""""date" >= date_trunc('month', current_date)
-and "date" <  date_trunc('month', current_date) + interval '1 month'""", {})
+        return (
+            """
+            "date" >= date_trunc('month', current_date)
+            and "date" <  date_trunc('month', current_date) + interval '1 month'
+            """.strip(),
+            {}
+        )
     return None, {}
+
 
 def extract_payee(q: str, known_payees: list[str]):
     ql = q.lower()
@@ -87,19 +118,14 @@ def extract_payee(q: str, known_payees: list[str]):
         return best_payee_match(m.group(1), known_payees)
     return None
 
+
 def apply_intent_func_override(intent: str, question: str):
-    # keep it deterministic and compatible with your existing logic
     if intent == "revenue":
         return "Revenue"
     if intent in ("expense", "recoup", "cashflow", "trial_balance", "search"):
         return None
     return USE_UI
 
-def _is_blank_sql(col: str) -> str:
-    return f"NULLIF(BTRIM({col}), '') IS NULL"
-
-def _not_blank_sql(col: str) -> str:
-    return f"NULLIF(BTRIM({col}), '') IS NOT NULL"
 
 def render_qa_tab(engine, f, *, rel: str):
     st.subheader("Ask a Finance Question (Deterministic + Search)")
@@ -116,7 +142,7 @@ def render_qa_tab(engine, f, *, rel: str):
     payee = extract_payee(q, known_payees)
     func_override = apply_intent_func_override(intent, q)
 
-    where, params, effective_func = build_where_from_ui(
+    where, params, _ = build_where_from_ui(
         f["df"], f["dt"], f["bank"], f["head"], f["account"], f["attribute"], f["func_code"],
         fy_label=f["fy_label"], func_override=func_override
     )
@@ -124,7 +150,7 @@ def render_qa_tab(engine, f, *, rel: str):
     date_sql, date_params = infer_date_sql(q)
     if date_sql:
         where = [w for w in where if "between :df and :dt" not in w and '"date" between' not in w]
-        where.insert(0, date_sql.strip())
+        where.insert(0, date_sql)
         params.update(date_params)
 
     m_start, m_end_excl = parse_month_range(q)
@@ -140,7 +166,6 @@ def render_qa_tab(engine, f, *, rel: str):
 
     where_sql = " and ".join(where) if where else "1=1"
 
-    # Routing
     if intent == "revenue":
         if struct["by_head"] and struct["monthly"]:
             st.subheader("Revenue by Head (Monthly) — Pivot")
@@ -198,20 +223,27 @@ def render_qa_tab(engine, f, *, rel: str):
             show_df(run_df(engine, sql, params, ["Month","Month Label","Revenue"], rel=rel0), label_col="Month Label")
             return
 
-        val = run_scalar(engine, f"""select coalesce(sum(coalesce(credit_deposit,0)),0) from {rel0} where {where_sql}
-            and func_code = 'Revenue' and coalesce(credit_deposit,0) > 0""", params, rel=rel0)
+        val = run_scalar(engine, f"""
+            select coalesce(sum(coalesce(credit_deposit,0)),0)
+            from {rel0}
+            where {where_sql}
+              and func_code = 'Revenue'
+              and coalesce(credit_deposit,0) > 0
+        """, params, rel=rel0)
         st.success(f"Total Revenue: {val:,.0f} PKR")
         return
 
     if intent == "expense":
-        st.subheader("Expense")
+        st.subheader("Expense by Head")
         exp_expr = expense_amount_expr(engine, rel0)
-        sql = f"""select head_name, sum({exp_expr}) as outflow
-                  from {rel0}
-                  where {where_sql}
-                  group by 1
-                  order by 2 desc
-                  limit 50"""
+        sql = f"""
+            select head_name, sum({exp_expr}) as outflow
+            from {rel0}
+            where {where_sql}
+            group by 1
+            order by 2 desc
+            limit 50
+        """
         show_df(run_df(engine, sql, params, ["Head","Outflow"], rel=rel0), label_col="Head")
         return
 
@@ -219,27 +251,45 @@ def render_qa_tab(engine, f, *, rel: str):
         st.subheader("Cashflow by Bank & Direction")
         net_expr = cashflow_net_expr(engine, rel0)
         dir_expr = cashflow_dir_expr(engine, rel0, net_expr)
-        sql = f"""select coalesce(bank,'UNKNOWN') as bank, {dir_expr} as direction, sum({net_expr}) as amount
-                  from {rel0} where {where_sql}
-                  group by 1,2 order by 1,2"""
+        sql = f"""
+            select coalesce(bank,'UNKNOWN') as bank,
+                   {dir_expr} as direction,
+                   sum({net_expr}) as amount
+            from {rel0}
+            where {where_sql}
+            group by 1,2
+            order by 1,2
+        """
         show_df(run_df(engine, sql, params, ["Bank","Direction","Amount"], rel=rel0), label_col="Bank")
         return
 
     if intent == "trial_balance":
         st.subheader("Trial Balance")
         amt_expr = tb_amount_expr(engine, rel0)
-        sql = f"""select account, sum({amt_expr}) as balance from {rel0} where {where_sql} group by 1 order by 1"""
+        sql = f"""
+            select account, sum({amt_expr}) as balance
+            from {rel0}
+            where {where_sql}
+            group by 1
+            order by 1
+        """
         show_df(run_df(engine, sql, params, ["Account","Balance"], rel=rel0), label_col="Account")
         return
 
-    # search
     st.subheader("Search (latest rows)")
     params2 = dict(params)
     params2["q"] = f"%{q.strip()}%"
-    sql = f"""select "date", bank, account, head_name, pay_to, description
-             from {rel0}
-             where {where_sql}
-               and (coalesce(description,'') ilike :q or coalesce(pay_to,'') ilike :q or coalesce(account,'') ilike :q or coalesce(head_name,'') ilike :q)
-             order by "date" desc
-             limit 200"""
+    sql = f"""
+        select "date", bank, account, head_name, pay_to, description
+        from {rel0}
+        where {where_sql}
+          and (
+            coalesce(description,'') ilike :q
+            or coalesce(pay_to,'') ilike :q
+            or coalesce(account,'') ilike :q
+            or coalesce(head_name,'') ilike :q
+          )
+        order by "date" desc
+        limit 200
+    """
     show_df(run_df(engine, sql, params2, rel=rel0))
