@@ -78,7 +78,7 @@ def render_recoup_intelligence_tab(engine, f, *, rel: str):
     sql_pending = f"""
         select
           "date"::date as date,
-          (current_date - "date")::int as age_days,
+          (current_date - ("date"::date))::int as age_days,
           bank, account, head_name, pay_to, bill_no, folio_chq_no,
           {amt_expr} as amount,
           description
