@@ -144,30 +144,30 @@ def parse_field_search(q: str) -> tuple[str | None, str | None]:
 
 
 def detect_intent(q: str) -> str:
-    ql = q.lower()
+    ql = q.lower().strip()
+
+    # compliance / policy checks
+    if any(p in ql for p in ["violation", "violations", "policy", "compliance", "without bill", "no bill reference", "head mapping", "unmapped head"]):
+        return "compliance"
+
 
     # trial balance
     if "trial balance" in ql or "tb" in ql or "balance as of" in ql:
         return "trial_balance"
 
-    # cashflow
     if "cashflow" in ql or "cash flow" in ql:
         return "cashflow"
 
-    # Expense should win if user is excluding recoup (otherwise the word 'recoup' triggers recoup intent)
     if any(w in ql for w in ["expense", "cost", "paid", "payment", "wages", "salary"]):
         return "expense"
 
-    # recoup
     if "recoup" in ql:
         return "recoup"
 
-    # revenue
     if any(w in ql for w in ["revenue", "income", "grant"]):
         return "revenue"
 
-    # explicit search command
-    if ql.strip().startswith("search "):
+    if ql.startswith("search "):
         return "search"
 
     return "search"
@@ -381,7 +381,91 @@ def render_qa_tab(engine, f, *, rel: str):
         """, params, rel=relr)
         st.success(f"Total Revenue: {val:,.0f} PKR")
         return
+ # ---- Compliance / Policy ----
+    if intent == "compliance":
+        st.subheader("Compliance / Policy Checks")
 
+        ql = q.lower()
+
+        # 1) Recoup policy violations (practical definition):
+        #    - bill_no='Recoup' AND status blank AND older than N days
+        if "recoup" in ql and ("violation" in ql or "policy" in ql or "compliance" in ql):
+            # Default: flag pending recoup older than 30 days
+            days = 30
+            m = re.search(r"\b(\d{1,3})\s*days\b", ql)
+            if m:
+                days = int(m.group(1))
+
+            sql = f"""
+                select
+                    "date",
+                    bank,
+                    account,
+                    head_name,
+                    pay_to,
+                    bill_no,
+                    status,
+                    voucher_no,
+                    reference_no,
+                    (coalesce(debit_payment,0) - coalesce(credit_deposit,0)) as amount,
+                    (current_date - "date") as age_days
+                from {rel0}
+                where {where_sql}
+                  and bill_no = 'Recoup'
+                  and nullif(trim(coalesce(status,'')),'') is null
+                  and (current_date - "date") >= :days
+                order by "date" asc
+                limit 500
+            """
+            params2 = dict(params)
+            params2["days"] = days
+            df_out = run_df(engine, sql, params2, rel=rel0)
+            show_df(df_out)
+            return
+
+        # 2) Payments without bill reference
+        if ("without bill reference" in ql) or ("no bill reference" in ql) or ("bill reference" in ql and "without" in ql):
+            sql = f"""
+                select
+                    "date", bank, account, head_name, pay_to,
+                    voucher_no, reference_no, bill_no, status,
+                    coalesce(debit_payment,0) as debit_payment,
+                    coalesce(credit_deposit,0) as credit_deposit,
+                    description
+                from {rel0}
+                where {where_sql}
+                  and coalesce(debit_payment,0) > 0
+                  and nullif(trim(coalesce(bill_no,'')),'') is null
+                order by "date" desc
+                limit 500
+            """
+            df_out = run_df(engine, sql, params, rel=rel0)
+            show_df(df_out)
+            return
+
+        # 3) Expenses without approved head mapping
+        # Option A (no mapping table): treat blank head_name as unmapped
+        if ("head mapping" in ql) or ("unmapped head" in ql) or ("without approved head" in ql):
+            rele = pick_view(engine, REL_EXP, rel0)
+            exp_expr = expense_amount_expr(engine, rele)
+            sql = f"""
+                select
+                    "date", bank, account, pay_to,
+                    head_name, voucher_no, reference_no,
+                    {exp_expr} as amount,
+                    description
+                from {rele}
+                where {where_sql}
+                  and (nullif(trim(coalesce(head_name,'')),'') is null)
+                order by "date" desc
+                limit 500
+            """
+            df_out = run_df(engine, sql, params, rel=rele)
+            show_df(df_out)
+            return
+
+        st.info("Try: 'recoup policy violations 60 days' | 'payments without bill reference' | 'expenses without approved head mapping'")
+        return
     # -----------------------------
     # Expense
     # -----------------------------
