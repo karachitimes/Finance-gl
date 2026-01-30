@@ -1,19 +1,19 @@
-# 🎈 finance app template
+# Finance Analytics System (Modular Streamlit App)
 
-A simple Streamlit app template for you to modify!
+This repository is a modularized version of your original `streamlit_app.py`.
 
-[![Open in Streamlit](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://blank-app-template.streamlit.app/)
+## Files
+- `app.py` - Streamlit entrypoint (UI + routing)
+- `db.py` - database engine and query helpers
+- `filters.py` - UI filter bar + where builder
+- `semantic.py` - view names + schema-safe SQL expressions
+- `dashboards.py` - Revenue/Expense/Cashflow/Trial Balance tabs
+- `recoup.py` - Recoup KPI tab (PowerPivot/DAX equivalents)
+- `qa.py` - deterministic AI Q&A router
+- `utils.py` - dataframe rendering helpers (totals)
 
-### How to run it on your own machine
-
-1. Install the requirements
-
-   ```
-   $ pip install -r requirements.txt
-   ```
-
-2. Run the app
-
-   ```
-   $ streamlit run streamlit_app.py
-   ```
+## Run locally
+1. Create a virtual environment
+2. Install requirements
+3. Add `.streamlit/secrets.toml` with `DATABASE_URL`
+4. Run `streamlit run app.py`
