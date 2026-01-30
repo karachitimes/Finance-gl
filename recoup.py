@@ -248,7 +248,9 @@ def render_recoup_intelligence_tab(engine, f, *, rel: str):
         )
 
         st.markdown("#### Cycle Time Distribution")
-        show_df(df_cycle[[group_key, "start_date", "completed_date", "cycle_days"]])
+        cols = [c for c in [group_key, "start_date", "completed_date", "cycle_days"] if c in df_cycle.columns]
+        
+        show_df(df_cycle[cols])
 
         st.metric("Average Cycle Time (days)", round(df_cycle["cycle_days"].mean(), 2))
         st.metric("Max Cycle Time (days)", int(df_cycle["cycle_days"].max()))
