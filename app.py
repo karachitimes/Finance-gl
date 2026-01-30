@@ -12,8 +12,8 @@ from search import render_search_tab
 # -------------------------------------------------
 # PAGE CONFIG
 # -------------------------------------------------
-st.set_page_config(page_title="Finance Analytics System", layout="wide")
-st.title("📊 Finance Analytics System")
+st.set_page_config(page_title="KoFHA Finance Analytics System", layout="wide")
+st.title("📊 KoFHA Finance Analytics System")
 
 engine = get_engine()
 
