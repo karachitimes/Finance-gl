@@ -27,7 +27,7 @@ def render_classification_tab(engine, f, *, rel: str):
 
     # Identify "unmapped": blank head_name (or placeholder)
     unmapped_sql = f"""
-        select "date", bank, account, pay_to, head_name, voucher_no, reference_no, description,
+        select "date", bank, account, pay_to, head_name, bill_no, folio_chq_no, description,
                coalesce(debit_payment,0) as debit_payment,
                coalesce(credit_deposit,0) as credit_deposit
         from {rele}
@@ -88,7 +88,7 @@ def render_classification_tab(engine, f, *, rel: str):
     df_s = df_s.merge(df_best[group_keys + ["head_name", "confidence", "total_n"]], on=group_keys, how="left", suffixes=("", "_suggested"))
     df_s = df_s.rename(columns={"head_name_suggested": "Suggested Head", "confidence": "Confidence", "total_n": "Support"})
 
-    out_cols = ["date", "bank", "account", "pay_to", "description", "Suggested Head", "Confidence", "Support", "voucher_no", "reference_no"]
+    out_cols = ["date", "bank", "account", "pay_to", "description", "Suggested Head", "Confidence", "Support", "bill_no", "folio_chq_no"]
     out_cols = [c for c in out_cols if c in df_s.columns]
     df_out = df_s[out_cols].copy()
 
