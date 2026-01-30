@@ -8,6 +8,11 @@ from dashboards import render_revenue_tab, render_expense_tab, render_cashflow_t
 from recoup import render_recoup_kpi_tab
 from qa import render_qa_tab
 from search import render_search_tab
+from revenue_intelligence import render_revenue_intelligence
+from expense_intelligence import render_expense_intelligence
+from risk_engine import render_risk_engine
+from health_scores import render_health_scores
+from executive_dashboard import render_executive_dashboard
 
 # -------------------------------------------------
 # PAGE CONFIG
@@ -51,9 +56,22 @@ rel = get_source_relation(engine)
 # -------------------------------------------------
 # TABS
 # -------------------------------------------------
-tab_rev, tab_exp, tab_cf, tab_tb, tab_rec_kpi, tab_qa, tab_search = st.tabs(
-    ["Revenue","Expense","Cashflow","Trial Balance","Recoup KPIs","AI Q&A","Search"]
-)
+tab_rev, tab_exp, tab_cf, tab_tb, tab_rec_kpi, \
+tab_rev_intel, tab_exp_intel, tab_risk, tab_health, tab_exec, \
+tab_qa, tab_search = st.tabs([
+    "Revenue",
+    "Expense",
+    "Cashflow",
+    "Trial Balance",
+    "Recoup KPIs",
+    "Revenue Intelligence",
+    "Expense Intelligence",
+    "Risk Engine",
+    "Health Scores",
+    "Executive Dashboard",
+    "AI Q&A",
+    "Search"
+])
 
 with tab_rev:
     render_revenue_tab(engine, f)
@@ -70,9 +88,23 @@ with tab_tb:
 with tab_rec_kpi:
     render_recoup_kpi_tab(engine, f, rel=rel)
 
+with tab_rev_intel:
+    render_revenue_intelligence(engine, f, rel=rel)
+
+with tab_exp_intel:
+    render_expense_intelligence(engine, f, rel=rel)
+
+with tab_risk:
+    render_risk_engine(engine, f, rel=rel)
+
+with tab_health:
+    render_health_scores(engine, f, rel=rel)
+
+with tab_exec:
+    render_executive_dashboard(engine, f, rel=rel)
+
 with tab_qa:
     render_qa_tab(engine, f, rel=rel)
-
 
 with tab_search:
     render_search_tab(engine, f, rel=rel)
