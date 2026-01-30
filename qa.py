@@ -60,6 +60,9 @@ def _norm(s: str) -> str:
     return (s or "").strip().lower()
 
 def not_recoup_filter(q: str) -> bool:
+    t = _norm(q)
+    return ("not recoup" in t) or ("exclude recoup" in t) or ("without recoup" in t) or ("bill_no not recoup" in t)
+
 
 def parse_pay_to(q: str) -> str | None:
     """Detect patterns like 'pay to Ahmed', 'pay to "ABC Traders"', 'payto xyz'"""
@@ -83,9 +86,7 @@ def parse_pay_to(q: str) -> str | None:
         return m.group(1).strip()
 
     return None
-    t = _norm(q)
-    return ("not recoup" in t) or ("exclude recoup" in t) or ("without recoup" in t) or ("bill_no not recoup" in t)
-
+    
 def wants_monthly(q: str) -> bool:
     t = _norm(q)
     return ("monthly" in t) or ("monthwise" in t) or ("month wise" in t) or ("by month" in t) or ("trend" in t)
@@ -280,22 +281,23 @@ def render_qa_tab(engine, f, *, rel: str):
     if intent == "expense" and not_recoup_filter(q):
         where.append("coalesce(bill_no,'') <> 'Recoup'")
 
-# expense modifier: folio cheque blank (optional)
-if intent == "expense":
-    t = (q or "").lower()
-    if ("folio_chq_no" in t or "folio chq no" in t or "folio cheque" in t or "folio cheq" in t) and ("blank" in t or "empty" in t or "null" in t):
-        if has_column(REL_EXP, "folio_chq_no"):
-            where.append("NULLIF(TRIM(COALESCE(folio_chq_no,'')),'') IS NULL")
-        else:
-            st.warning("folio_chq_no column not available in expense view for filtering.")
+    # expense modifier: folio cheque blank (optional)
+    if intent == "expense":
+        t = (q or "").lower()
+        if ("folio_chq_no" in t or "folio chq no" in t or "folio cheque" in t or "folio cheq" in t) and ("blank" in t or "empty" in t or "null" in t):
+            if has_column(REL_EXP, "folio_chq_no"):
+                where.append("NULLIF(TRIM(COALESCE(folio_chq_no,'')),'') IS NULL")
+            else:
+                st.warning("folio_chq_no column not available in expense view for filtering.")
 
-    
+        
         # pay_to filter from question text
-        pay_to_name = parse_pay_to(q)
-        if pay_to_name and has_column(REL_SEM, "pay_to"):
-            where.append("pay_to ilike :pay_to_name")
-            params["pay_to_name"] = f"%{pay_to_name}%"
-where_sql = " and ".join(where) if where else "1=1"
+    pay_to_name = parse_pay_to(q)
+    if pay_to_name and has_column(REL_SEM, "pay_to"):
+        where.append("pay_to ilike :pay_to_name")
+        params["pay_to_name"] = f"%{pay_to_name}%"
+    
+    where_sql = " and ".join(where) if where else "1=1"
 
     # -----------------------------
     # Revenue
