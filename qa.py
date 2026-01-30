@@ -60,6 +60,29 @@ def _norm(s: str) -> str:
     return (s or "").strip().lower()
 
 def not_recoup_filter(q: str) -> bool:
+
+def parse_pay_to(q: str) -> str | None:
+    """Detect patterns like 'pay to Ahmed', 'pay to "ABC Traders"', 'payto xyz'"""
+    if not q:
+        return None
+    t = q.strip()
+
+    # pay to "Name Here"
+    m = re.search(r'pay\s*to\s*["\']([^"\']+)["\']', t, flags=re.I)
+    if m:
+        return m.group(1).strip()
+
+    # pay to Name Here
+    m = re.search(r'pay\s*to\s+([a-zA-Z0-9 ._&-]+)', t, flags=re.I)
+    if m:
+        return m.group(1).strip()
+
+    # payto Name
+    m = re.search(r'payto\s+([a-zA-Z0-9 ._&-]+)', t, flags=re.I)
+    if m:
+        return m.group(1).strip()
+
+    return None
     t = _norm(q)
     return ("not recoup" in t) or ("exclude recoup" in t) or ("without recoup" in t) or ("bill_no not recoup" in t)
 
@@ -266,7 +289,13 @@ if intent == "expense":
         else:
             st.warning("folio_chq_no column not available in expense view for filtering.")
 
-    where_sql = " and ".join(where) if where else "1=1"
+    
+        # pay_to filter from question text
+        pay_to_name = parse_pay_to(q)
+        if pay_to_name and has_column(REL_SEM, "pay_to"):
+            where.append("pay_to ilike :pay_to_name")
+            params["pay_to_name"] = f"%{pay_to_name}%"
+where_sql = " and ".join(where) if where else "1=1"
 
     # -----------------------------
     # Revenue
