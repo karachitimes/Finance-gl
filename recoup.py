@@ -79,7 +79,7 @@ def render_recoup_intelligence_tab(engine, f, *, rel: str):
         select
           "date"::date as date,
           (current_date - "date")::int as age_days,
-          bank, account, head_name, pay_to, voucher_no, reference_no,
+          bank, account, head_name, pay_to, bill_no, folio_chq_no,
           {amt_expr} as amount,
           description
         from {rel0}
@@ -129,14 +129,14 @@ def render_recoup_intelligence_tab(engine, f, *, rel: str):
 
     # ---- 3) Cycle time (approx) + Completion efficiency
     st.subheader("Cycle time (approx)")
-    st.caption("Approximation: group by reference_no (fallback voucher_no). Start = earliest date, Complete = earliest date where status is filled.")
+    st.caption("Approximation: group by folio_chq_no (fallback bill_no). Start = earliest date, Complete = earliest date where status is filled.")
 
-    key_col = "reference_no" if "reference_no" in (df_pending.columns if df_pending is not None else []) else "reference_no"
+    key_col = "folio_chq_no" if "folio_chq_no" in (df_pending.columns if df_pending is not None else []) else "folio_chq_no"
     # Build from SQL so it works even if df_pending is empty
     sql_cycle = f"""
         with r as (
             select
-              coalesce(nullif(trim(coalesce(reference_no,'')),''), nullif(trim(coalesce(voucher_no,'')),''), 'UNKNOWN') as rec_key,
+              coalesce(nullif(trim(coalesce(folio_chq_no,'')),''), nullif(trim(coalesce(bill_no,'')),''), 'UNKNOWN') as rec_key,
               "date"::date as dt,
               nullif(trim(coalesce(status,'')),'') as status_norm,
               {amt_expr} as amount
