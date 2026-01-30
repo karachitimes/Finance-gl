@@ -50,7 +50,7 @@ def render_compliance_tab(engine, f, *, rel: str):
 
         sql = f"""
             select "date", bank, account, pay_to,
-                   head_name, voucher_no, reference_no,
+                   head_name, bill_no, folio_chq_no,
                    {exp_expr} as amount,
                    description
             from {rele}
@@ -70,7 +70,7 @@ def render_compliance_tab(engine, f, *, rel: str):
         # Works on base relation (semantic or gl_register)
         sql = f"""
             select "date", bank, account, head_name, pay_to,
-                   voucher_no, reference_no, bill_no, status,
+                   folio_chq_no, bill_no, status,
                    coalesce(debit_payment,0) as debit_payment,
                    coalesce(credit_deposit,0) as credit_deposit,
                    description
@@ -115,7 +115,7 @@ def render_compliance_tab(engine, f, *, rel: str):
         days = st.number_input("Pending age threshold (days)", min_value=1, max_value=3650, value=30, step=5)
         sql = f"""
             select "date", bank, account, head_name, pay_to,
-                   bill_no, status, voucher_no, reference_no,
+                   bill_no, status, folio_chq_no,
                    (coalesce(debit_payment,0) - coalesce(credit_deposit,0)) as amount,
                    (current_date - "date") as age_days,
                    description
@@ -138,8 +138,8 @@ def render_compliance_tab(engine, f, *, rel: str):
     # -----------------------------
     # Duplicate voucher/reference
     # -----------------------------
-    if check == "Duplicate Voucher/Reference":
-        key = st.selectbox("Match key", ["voucher_no", "reference_no"], index=0)
+    if check == "Duplicate bill_no/folio_chq_no":
+        key = st.selectbox("Match key", ["bill_no", "folio_chq_no"], index=0)
         if not has_column(engine, rel0, key):
             st.info(f"Column {key} not available in {rel0}.")
             return
