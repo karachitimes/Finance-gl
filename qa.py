@@ -257,6 +257,15 @@ def render_qa_tab(engine, f, *, rel: str):
     if intent == "expense" and not_recoup_filter(q):
         where.append("coalesce(bill_no,'') <> 'Recoup'")
 
+# expense modifier: folio cheque blank (optional)
+if intent == "expense":
+    t = (q or "").lower()
+    if ("folio_chq_no" in t or "folio chq no" in t or "folio cheque" in t or "folio cheq" in t) and ("blank" in t or "empty" in t or "null" in t):
+        if has_column(REL_EXP, "folio_chq_no"):
+            where.append("NULLIF(TRIM(COALESCE(folio_chq_no,'')),'') IS NULL")
+        else:
+            st.warning("folio_chq_no column not available in expense view for filtering.")
+
     where_sql = " and ".join(where) if where else "1=1"
 
     # -----------------------------
