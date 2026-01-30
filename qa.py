@@ -60,14 +60,6 @@ def _norm(s: str) -> str:
     return (s or "").strip().lower()
 
 def not_recoup_filter(q: str) -> bool:
-    t = _norm(q)
-    return (
-        ("not recoup" in t)
-        or ("exclude recoup" in t)
-        or ("without recoup" in t)
-        or ("bill_no not recoup" in t)
-    )
-
 
 def parse_pay_to(q: str) -> str | None:
     """Detect patterns like 'pay to Ahmed', 'pay to "ABC Traders"', 'payto xyz'"""
@@ -91,7 +83,9 @@ def parse_pay_to(q: str) -> str | None:
         return m.group(1).strip()
 
     return None
-    
+    t = _norm(q)
+    return ("not recoup" in t) or ("exclude recoup" in t) or ("without recoup" in t) or ("bill_no not recoup" in t)
+
 def wants_monthly(q: str) -> bool:
     t = _norm(q)
     return ("monthly" in t) or ("monthwise" in t) or ("month wise" in t) or ("by month" in t) or ("trend" in t)
@@ -137,37 +131,37 @@ def parse_as_of_date(q: str) -> date | None:
     return None
 
 def parse_field_search(q: str) -> tuple[str | None, str | None]:
-    m = re.search(r"\bsearch\s+(folio_chq_no|bill_no|status|account|bank|head_name|pay_to)\s+(.+)$", q.strip(), flags=re.I)
+    m = re.search(r"\bsearch\s+(voucher_no|reference_no|bill_no|status|account|bank|head_name|pay_to)\s+(.+)$", q.strip(), flags=re.I)
     if not m:
         return None, None
     return m.group(1).lower(), m.group(2).strip()
 
 
 def detect_intent(q: str) -> str:
-    ql = q.lower().strip()
-
-    # compliance / policy checks
-    if any(p in ql for p in ["violation", "violations", "policy", "compliance", "without bill", "no bill reference", "head mapping", "unmapped head"]):
-        return "compliance"
-
+    ql = q.lower()
 
     # trial balance
     if "trial balance" in ql or "tb" in ql or "balance as of" in ql:
         return "trial_balance"
 
+    # cashflow
     if "cashflow" in ql or "cash flow" in ql:
         return "cashflow"
 
+    # Expense should win if user is excluding recoup (otherwise the word 'recoup' triggers recoup intent)
     if any(w in ql for w in ["expense", "cost", "paid", "payment", "wages", "salary"]):
         return "expense"
 
+    # recoup
     if "recoup" in ql:
         return "recoup"
 
+    # revenue
     if any(w in ql for w in ["revenue", "income", "grant"]):
         return "revenue"
 
-    if ql.startswith("search "):
+    # explicit search command
+    if ql.strip().startswith("search "):
         return "search"
 
     return "search"
@@ -257,11 +251,6 @@ def render_qa_tab(engine, f, *, rel: str):
         f["df"], f["dt"], f["bank"], f["head"], f["account"], f["attribute"], f["func_code"],
         fy_label=f["fy_label"], func_override=func_override
     )
-    # pay_to filter from question text (deterministic)
-    pay_to_name = parse_pay_to(q)
-    if pay_to_name:
-        where.append("pay_to ilike :pay_to_name")
-        params["pay_to_name"] = f"%{pay_to_name}%"
 
     # "as of" date for trial balance
     asof = parse_as_of_date(q)
@@ -291,24 +280,22 @@ def render_qa_tab(engine, f, *, rel: str):
     if intent == "expense" and not_recoup_filter(q):
         where.append("coalesce(bill_no,'') <> 'Recoup'")
 
-    # expense modifier: folio cheque blank (optional)
-    if intent == "expense":
-        t = (q or "").lower()
-        if ("folio_chq_no" in t or "folio chq no" in t or "folio cheque" in t or "folio cheq" in t) and ("blank" in t or "empty" in t or "null" in t):
-            if has_column(engine, REL_EXP, "folio_chq_no"):
+# expense modifier: folio cheque blank (optional)
+if intent == "expense":
+    t = (q or "").lower()
+    if ("folio_chq_no" in t or "folio chq no" in t or "folio cheque" in t or "folio cheq" in t) and ("blank" in t or "empty" in t or "null" in t):
+        if has_column(REL_EXP, "folio_chq_no"):
+            where.append("NULLIF(TRIM(COALESCE(folio_chq_no,'')),'') IS NULL")
+        else:
+            st.warning("folio_chq_no column not available in expense view for filtering.")
 
-                where.append("NULLIF(TRIM(COALESCE(folio_chq_no,'')),'') IS NULL")
-            else:
-                st.warning("folio_chq_no column not available in expense view for filtering.")
-
-        
-        # pay_to filter from question text
-    pay_to_name = parse_pay_to(q)
-    if pay_to_name and has_column(REL_SEM, "pay_to"):
-        where.append("pay_to ilike :pay_to_name")
-        params["pay_to_name"] = f"%{pay_to_name}%"
     
-    where_sql = " and ".join(where) if where else "1=1"
+        # pay_to filter from question text
+        pay_to_name = parse_pay_to(q)
+        if pay_to_name and has_column(REL_SEM, "pay_to"):
+            where.append("pay_to ilike :pay_to_name")
+            params["pay_to_name"] = f"%{pay_to_name}%"
+where_sql = " and ".join(where) if where else "1=1"
 
     # -----------------------------
     # Revenue
@@ -382,90 +369,7 @@ def render_qa_tab(engine, f, *, rel: str):
         """, params, rel=relr)
         st.success(f"Total Revenue: {val:,.0f} PKR")
         return
- # ---- Compliance / Policy ----
-    if intent == "compliance":
-        st.subheader("Compliance / Policy Checks")
 
-        ql = q.lower()
-
-        # 1) Recoup policy violations (practical definition):
-        #    - bill_no='Recoup' AND status blank AND older than N days
-        if "recoup" in ql and ("violation" in ql or "policy" in ql or "compliance" in ql):
-            # Default: flag pending recoup older than 30 days
-            days = 30
-            m = re.search(r"\b(\d{1,3})\s*days\b", ql)
-            if m:
-                days = int(m.group(1))
-
-            sql = f"""
-                select
-                    "date",
-                    bank,
-                    account,
-                    head_name,
-                    pay_to,
-                    bill_no,
-                    status,
-                    folio_chq_no,
-                    (coalesce(debit_payment,0) - coalesce(credit_deposit,0)) as amount,
-                    (current_date - "date") as age_days
-                from {rel0}
-                where {where_sql}
-                  and bill_no = 'Recoup'
-                  and nullif(trim(coalesce(status,'')),'') is null
-                  and (current_date - "date") >= :days
-                order by "date" asc
-                limit 500
-            """
-            params2 = dict(params)
-            params2["days"] = days
-            df_out = run_df(engine, sql, params2, rel=rel0)
-            show_df(df_out)
-            return
-
-        # 2) Payments without bill reference
-        if ("without bill reference" in ql) or ("no bill reference" in ql) or ("bill reference" in ql and "without" in ql):
-            sql = f"""
-                select
-                    "date", bank, account, head_name, pay_to,
-                    folio_chq_no, bill_no, status,
-                    coalesce(debit_payment,0) as debit_payment,
-                    coalesce(credit_deposit,0) as credit_deposit,
-                    description
-                from {rel0}
-                where {where_sql}
-                  and coalesce(debit_payment,0) > 0
-                  and nullif(trim(coalesce(bill_no,'')),'') is null
-                order by "date" desc
-                limit 500
-            """
-            df_out = run_df(engine, sql, params, rel=rel0)
-            show_df(df_out)
-            return
-
-        # 3) Expenses without approved head mapping
-        # Option A (no mapping table): treat blank head_name as unmapped
-        if ("head mapping" in ql) or ("unmapped head" in ql) or ("without approved head" in ql):
-            rele = pick_view(engine, REL_EXP, rel0)
-            exp_expr = expense_amount_expr(engine, rele)
-            sql = f"""
-                select
-                    "date", bank, account, pay_to,
-                    head_name, bill_no, folio_chq_no,
-                    {exp_expr} as amount,
-                    description
-                from {rele}
-                where {where_sql}
-                  and (nullif(trim(coalesce(head_name,'')),'') is null)
-                order by "date" desc
-                limit 500
-            """
-            df_out = run_df(engine, sql, params, rel=rele)
-            show_df(df_out)
-            return
-
-        st.info("Try: 'recoup policy violations 60 days' | 'payments without bill reference' | 'expenses without approved head mapping'")
-        return
     # -----------------------------
     # Expense
     # -----------------------------
@@ -661,7 +565,7 @@ def render_qa_tab(engine, f, *, rel: str):
         """
 
     base_cols = ['"date"', "bank", "account", "head_name", "pay_to", "description"]
-    optional_cols = ["debit_payment", "credit_deposit", "gl_amount", "net_flow", "bill_no", "status", "folio_chq_no", "func_code", "attribute"]
+    optional_cols = ["debit_payment", "credit_deposit", "gl_amount", "net_flow", "bill_no", "status", "voucher_no", "reference_no", "func_code", "attribute"]
     select_cols = []
     for c in base_cols:
         if c == '"date"' or has_column(engine, rel0, c):

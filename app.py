@@ -9,12 +9,6 @@ from recoup import render_recoup_kpi_tab
 from qa import render_qa_tab
 from search import render_search_tab
 
-# High-ROI add-ons
-from anomalies import render_anomalies_tab
-from compliance import render_compliance_tab
-from narrative import render_narrative_tab
-from classification import render_classification_tab
-
 # -------------------------------------------------
 # PAGE CONFIG
 # -------------------------------------------------
@@ -57,20 +51,8 @@ rel = get_source_relation(engine)
 # -------------------------------------------------
 # TABS
 # -------------------------------------------------
-tab_rev, tab_exp, tab_cf, tab_tb, tab_rec, tab_anom, tab_comp, tab_narr, tab_class, tab_qa, tab_search = st.tabs(
-    [
-        "Revenue",
-        "Expense",
-        "Cashflow",
-        "Trial Balance",
-        "Recoup Intelligence",
-        "Anomalies",
-        "Compliance",
-        "Narrative",
-        "Auto-Classification",
-        "AI Q&A",
-        "Search",
-    ]
+tab_rev, tab_exp, tab_cf, tab_tb, tab_rec_kpi, tab_qa, tab_search = st.tabs(
+    ["Revenue","Expense","Cashflow","Trial Balance","Recoup KPIs","AI Q&A","Search"]
 )
 
 with tab_rev:
@@ -85,20 +67,8 @@ with tab_cf:
 with tab_tb:
     render_trial_balance_tab(engine, f)
 
-with tab_rec:
+with tab_rec_kpi:
     render_recoup_kpi_tab(engine, f, rel=rel)
-
-with tab_anom:
-    render_anomalies_tab(engine, f, rel=rel)
-
-with tab_comp:
-    render_compliance_tab(engine, f, rel=rel)
-
-with tab_narr:
-    render_narrative_tab(engine, f, rel=rel)
-
-with tab_class:
-    render_classification_tab(engine, f, rel=rel)
 
 with tab_qa:
     render_qa_tab(engine, f, rel=rel)
