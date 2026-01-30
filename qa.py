@@ -18,9 +18,6 @@ from utils import show_df, show_pivot
 
 MONTHS = {m.lower(): i for i, m in enumerate(calendar.month_name) if m}
 
-# -----------------------------
-# Cached lists (DO NOT accept engine)
-# -----------------------------
 @st.cache_data(ttl=3600)
 def get_known_payees_cached(rel: str):
     engine = get_engine()
@@ -29,19 +26,7 @@ def get_known_payees_cached(rel: str):
         return [str(r[0]) for r in conn.execute(q).fetchall()]
 
 def get_known_payees(engine, rel: str):
-    # keep signature; engine unused
     return get_known_payees_cached(rel)
-
-@st.cache_data(ttl=3600)
-def get_known_func_codes_cached(rel: str):
-    engine = get_engine()
-    q = text(f"select distinct func_code from {rel} where func_code is not null order by 1")
-    with engine.connect() as conn:
-        return [str(r[0]) for r in conn.execute(q).fetchall()]
-
-def get_known_func_codes(engine, rel: str):
-    return get_known_func_codes_cached(rel)
-
 
 def best_payee_match(name: str | None, known_payees: list[str]):
     if not name:
@@ -52,39 +37,34 @@ def best_payee_match(name: str | None, known_payees: list[str]):
     matches = get_close_matches(name.title(), known_payees, n=1, cutoff=0.75)
     return matches[0] if matches else None
 
-
-# -----------------------------
-# Parsing helpers
-# -----------------------------
 def _norm(s: str) -> str:
     return (s or "").strip().lower()
 
 def not_recoup_filter(q: str) -> bool:
+    t = _norm(q)
+    return (
+        ("not recoup" in t) or ("exclude recoup" in t) or ("without recoup" in t)
+        or ("bill_no not recoup" in t)
+    )
 
 def parse_pay_to(q: str) -> str | None:
-    """Detect patterns like 'pay to Ahmed', 'pay to "ABC Traders"', 'payto xyz'"""
     if not q:
         return None
     t = q.strip()
 
-    # pay to "Name Here"
     m = re.search(r'pay\s*to\s*["\']([^"\']+)["\']', t, flags=re.I)
     if m:
         return m.group(1).strip()
 
-    # pay to Name Here
     m = re.search(r'pay\s*to\s+([a-zA-Z0-9 ._&-]+)', t, flags=re.I)
     if m:
         return m.group(1).strip()
 
-    # payto Name
     m = re.search(r'payto\s+([a-zA-Z0-9 ._&-]+)', t, flags=re.I)
     if m:
         return m.group(1).strip()
 
     return None
-    t = _norm(q)
-    return ("not recoup" in t) or ("exclude recoup" in t) or ("without recoup" in t) or ("bill_no not recoup" in t)
 
 def wants_monthly(q: str) -> bool:
     t = _norm(q)
@@ -123,7 +103,6 @@ def parse_as_of_date(q: str) -> date | None:
     m = re.search(r"\bas of\s+([0-9]{4}-[0-9]{2}-[0-9]{2})\b", t)
     if m:
         return datetime.strptime(m.group(1), "%Y-%m-%d").date()
-
     m = re.search(r"\bas of\s+([0-9]{1,2})[/-]([0-9]{1,2})[/-]([0-9]{4})\b", t)
     if m:
         dd, mm, yyyy = int(m.group(1)), int(m.group(2)), int(m.group(3))
@@ -131,41 +110,28 @@ def parse_as_of_date(q: str) -> date | None:
     return None
 
 def parse_field_search(q: str) -> tuple[str | None, str | None]:
-    m = re.search(r"\bsearch\s+(voucher_no|reference_no|bill_no|status|account|bank|head_name|pay_to)\s+(.+)$", q.strip(), flags=re.I)
+    # Your DB uses bill_no / ref / folio_chq_no (not voucher_no/reference_no)
+    m = re.search(r"\bsearch\s+(bill_no|status|account|bank|head_name|pay_to|ref|folio_chq_no)\s+(.+)$", q.strip(), flags=re.I)
     if not m:
         return None, None
     return m.group(1).lower(), m.group(2).strip()
 
-
 def detect_intent(q: str) -> str:
     ql = q.lower()
 
-    # trial balance
     if "trial balance" in ql or "tb" in ql or "balance as of" in ql:
         return "trial_balance"
-
-    # cashflow
     if "cashflow" in ql or "cash flow" in ql:
         return "cashflow"
-
-    # Expense should win if user is excluding recoup (otherwise the word 'recoup' triggers recoup intent)
     if any(w in ql for w in ["expense", "cost", "paid", "payment", "wages", "salary"]):
         return "expense"
-
-    # recoup
     if "recoup" in ql:
         return "recoup"
-
-    # revenue
     if any(w in ql for w in ["revenue", "income", "grant"]):
         return "revenue"
-
-    # explicit search command
     if ql.strip().startswith("search "):
         return "search"
-
     return "search"
-
 
 def detect_structure(q: str):
     return {
@@ -174,7 +140,6 @@ def detect_structure(q: str):
         "monthly": wants_monthly(q),
         "top": parse_top_n(q) is not None,
     }
-
 
 def parse_month_range(q: str, default_year: int | None = None):
     ql = q.lower()
@@ -190,7 +155,6 @@ def parse_month_range(q: str, default_year: int | None = None):
         end_excl = date(y2 + 1, 1, 1) if m2 == 12 else date(y2, m2 + 1, 1)
         return start, end_excl
     return None, None
-
 
 def infer_date_sql(q: str):
     ql = q.lower()
@@ -212,7 +176,6 @@ def infer_date_sql(q: str):
         )
     return None, {}
 
-
 def extract_payee(q: str, known_payees: list[str]):
     ql = q.lower()
     m = re.search(r"(?:to)\s+([a-z\s]+?)(?:\s+with|\s+month|\s+for|$)", ql)
@@ -220,25 +183,21 @@ def extract_payee(q: str, known_payees: list[str]):
         return best_payee_match(m.group(1), known_payees)
     return None
 
-
 def apply_intent_func_override(intent: str, question: str):
     if intent == "revenue":
         return "Revenue"
-    # expense/recoup/cashflow/tb/search should not force func_code unless user selected one in UI
     if intent in ("expense", "recoup", "cashflow", "trial_balance", "search"):
         return None
     return USE_UI
 
-
 def render_qa_tab(engine, f, *, rel: str):
     st.subheader("Ask a Finance Question (Deterministic + Search)")
-    st.caption("Examples: revenue by head monthly | expense by head monthly | expense by head top 10 | cashflow by bank monthly | recoup pending | trial balance as of 2026-01-31 | search voucher_no 1234")
+    st.caption("Examples: revenue by head monthly | expense by head monthly | expense by head top 10 | cashflow by bank monthly | recoup pending | trial balance as of 2026-01-31 | search bill_no 1234")
 
     q = st.text_input("Ask anything…", placeholder="expense by head monthly")
     if not q:
         return
 
-    # Prefer semantic views if present
     rel0 = pick_view(engine, REL_SEM, rel)
 
     known_payees = get_known_payees(engine, rel0)
@@ -252,19 +211,17 @@ def render_qa_tab(engine, f, *, rel: str):
         fy_label=f["fy_label"], func_override=func_override
     )
 
-    # "as of" date for trial balance
+    # as-of for TB
     asof = parse_as_of_date(q)
     if asof and intent == "trial_balance":
-        params["dt"] = asof  # keep df same; just cap at asof
+        params["dt"] = asof
 
-    # quick date phrases
     date_sql, date_params = infer_date_sql(q)
     if date_sql:
         where = [w for w in where if "between :df and :dt" not in w and '"date" between' not in w]
         where.insert(0, date_sql)
         params.update(date_params)
 
-    # month range like "Jan to Mar"
     m_start, m_end_excl = parse_month_range(q)
     if m_start and m_end_excl:
         where = [w for w in where if "between :df and :dt" not in w and '"date" between' not in w]
@@ -272,50 +229,45 @@ def render_qa_tab(engine, f, *, rel: str):
         params["m_start"] = m_start
         params["m_end"] = m_end_excl
 
-    if payee:
+    # Payee filters (both fuzzy "to X" and explicit "pay to X")
+    pay_to_name = parse_pay_to(q)
+    if pay_to_name:
+        where.append("pay_to ilike :pay_to_name")
+        params["pay_to_name"] = f"%{pay_to_name}%"
+    elif payee:
         where.append("pay_to ilike :payee")
         params["payee"] = f"%{payee}%"
 
-    # expense modifier: not recoup
     if intent == "expense" and not_recoup_filter(q):
         where.append("coalesce(bill_no,'') <> 'Recoup'")
 
-# expense modifier: folio cheque blank (optional)
-if intent == "expense":
-    t = (q or "").lower()
-    if ("folio_chq_no" in t or "folio chq no" in t or "folio cheque" in t or "folio cheq" in t) and ("blank" in t or "empty" in t or "null" in t):
-        if has_column(REL_EXP, "folio_chq_no"):
-            where.append("NULLIF(TRIM(COALESCE(folio_chq_no,'')),'') IS NULL")
-        else:
-            st.warning("folio_chq_no column not available in expense view for filtering.")
+    # Optional: folio_chq_no blank filter
+    if intent == "expense":
+        t = (q or "").lower()
+        if ("folio_chq_no" in t or "folio chq no" in t or "folio cheque" in t or "folio cheq" in t) and ("blank" in t or "empty" in t or "null" in t):
+            if has_column(engine, REL_EXP, "folio_chq_no"):
+                where.append("NULLIF(TRIM(COALESCE(folio_chq_no,'')),'') IS NULL")
+            else:
+                st.warning("folio_chq_no column not available for filtering.")
 
-    
-        # pay_to filter from question text
-        pay_to_name = parse_pay_to(q)
-        if pay_to_name and has_column(REL_SEM, "pay_to"):
-            where.append("pay_to ilike :pay_to_name")
-            params["pay_to_name"] = f"%{pay_to_name}%"
-where_sql = " and ".join(where) if where else "1=1"
+    where_sql = " and ".join(where) if where else "1=1"
 
-    # -----------------------------
-    # Revenue
-    # -----------------------------
+    # ---- Revenue
     if intent == "revenue":
-        # Use revenue view if available, else rel0
         relr = pick_view(engine, REL_REV, rel0)
 
         if struct["by_head"] and struct["monthly"]:
             st.subheader("Revenue by Head (Monthly) — Pivot")
             sql = f"""
-            select date_trunc('month',"date")::date as month,
-                   head_name,
-                   sum(coalesce(credit_deposit,0)) as revenue
-            from {relr}
-            where {where_sql}
-              and func_code = 'Revenue'
-              and coalesce(credit_deposit,0) > 0
-            group by 1,2
-            order by 1,3 desc
+                select date_trunc('month',"date")::date as month,
+                       head_name,
+                       sum(coalesce(credit_deposit,0)) as revenue
+                from {relr}
+                where {where_sql}
+                  and func_code = 'Revenue'
+                  and coalesce(credit_deposit,0) > 0
+                group by 1,2
+                order by 1,3 desc
             """
             df_out = run_df(engine, sql, params, ["Month","Head","Revenue"], rel=relr)
             if df_out.empty:
@@ -331,15 +283,15 @@ where_sql = " and ".join(where) if where else "1=1"
         if struct["by_head"]:
             st.subheader("Revenue by Head")
             sql = f"""
-            select head_name,
-                   sum(coalesce(credit_deposit,0)) as revenue
-            from {relr}
-            where {where_sql}
-              and func_code = 'Revenue'
-              and coalesce(credit_deposit,0) > 0
-            group by 1
-            order by 2 desc
-            limit 50
+                select head_name,
+                       sum(coalesce(credit_deposit,0)) as revenue
+                from {relr}
+                where {where_sql}
+                  and func_code = 'Revenue'
+                  and coalesce(credit_deposit,0) > 0
+                group by 1
+                order by 2 desc
+                limit 50
             """
             show_df(run_df(engine, sql, params, ["Head","Revenue"], rel=relr), label_col="Head")
             return
@@ -347,15 +299,15 @@ where_sql = " and ".join(where) if where else "1=1"
         if struct["monthly"]:
             st.subheader("Monthly Revenue")
             sql = f"""
-            select date_trunc('month',"date")::date as month,
-                   to_char(date_trunc('month',"date"),'Mon-YY') as month_label,
-                   sum(coalesce(credit_deposit,0)) as revenue
-            from {relr}
-            where {where_sql}
-              and func_code = 'Revenue'
-              and coalesce(credit_deposit,0) > 0
-            group by 1,2
-            order by 1
+                select date_trunc('month',"date")::date as month,
+                       to_char(date_trunc('month',"date"),'Mon-YY') as month_label,
+                       sum(coalesce(credit_deposit,0)) as revenue
+                from {relr}
+                where {where_sql}
+                  and func_code = 'Revenue'
+                  and coalesce(credit_deposit,0) > 0
+                group by 1,2
+                order by 1
             """
             show_df(run_df(engine, sql, params, ["Month","Month Label","Revenue"], rel=relr), label_col="Month Label")
             return
@@ -370,11 +322,8 @@ where_sql = " and ".join(where) if where else "1=1"
         st.success(f"Total Revenue: {val:,.0f} PKR")
         return
 
-    # -----------------------------
-    # Expense
-    # -----------------------------
+    # ---- Expense
     if intent == "expense":
-        # Use expense view if available, else rel0
         rele = pick_view(engine, REL_EXP, rel0)
         exp_expr = expense_amount_expr(engine, rele)
 
@@ -385,13 +334,13 @@ where_sql = " and ".join(where) if where else "1=1"
         if by_head and monthly:
             st.subheader("Expense by Head (Monthly) — Pivot")
             sql = f"""
-            select date_trunc('month',"date")::date as month,
-                   head_name,
-                   sum({exp_expr}) as outflow
-            from {rele}
-            where {where_sql}
-            group by 1,2
-            order by 1,3 desc
+                select date_trunc('month',"date")::date as month,
+                       head_name,
+                       sum({exp_expr}) as outflow
+                from {rele}
+                where {where_sql}
+                group by 1,2
+                order by 1,3 desc
             """
             df_out = run_df(engine, sql, params, ["Month","Head","Outflow"], rel=rele)
             if df_out.empty:
@@ -409,15 +358,14 @@ where_sql = " and ".join(where) if where else "1=1"
             if top_n:
                 label += f" (Top {top_n})"
             st.subheader(label)
-
             limit_sql = f"limit {int(top_n)}" if top_n else "limit 50"
             sql = f"""
-            select head_name, sum({exp_expr}) as outflow
-            from {rele}
-            where {where_sql}
-            group by 1
-            order by 2 desc
-            {limit_sql}
+                select head_name, sum({exp_expr}) as outflow
+                from {rele}
+                where {where_sql}
+                group by 1
+                order by 2 desc
+                {limit_sql}
             """
             show_df(run_df(engine, sql, params, ["Head","Outflow"], rel=rele), label_col="Head")
             return
@@ -425,13 +373,13 @@ where_sql = " and ".join(where) if where else "1=1"
         if monthly:
             st.subheader("Monthly Expense")
             sql = f"""
-            select date_trunc('month',"date")::date as month,
-                   to_char(date_trunc('month',"date"),'Mon-YY') as month_label,
-                   sum({exp_expr}) as outflow
-            from {rele}
-            where {where_sql}
-            group by 1,2
-            order by 1
+                select date_trunc('month',"date")::date as month,
+                       to_char(date_trunc('month',"date"),'Mon-YY') as month_label,
+                       sum({exp_expr}) as outflow
+                from {rele}
+                where {where_sql}
+                group by 1,2
+                order by 1
             """
             show_df(run_df(engine, sql, params, ["Month","Month Label","Outflow"], rel=rele), label_col="Month Label")
             return
@@ -444,9 +392,7 @@ where_sql = " and ".join(where) if where else "1=1"
         st.success(f"Total Expense Outflow: {val:,.0f} PKR")
         return
 
-    # -----------------------------
-    # Cashflow
-    # -----------------------------
+    # ---- Cashflow
     if intent == "cashflow":
         relc = pick_view(engine, REL_CF, rel0)
         net_expr = cashflow_net_expr(engine, relc)
@@ -455,13 +401,13 @@ where_sql = " and ".join(where) if where else "1=1"
         if struct["monthly"]:
             st.subheader("Cashflow by Bank (Monthly) — Pivot")
             sql = f"""
-            select date_trunc('month',"date")::date as month,
-                   coalesce(bank,'UNKNOWN') as bank,
-                   sum({net_expr}) as amount
-            from {relc}
-            where {where_sql}
-            group by 1,2
-            order by 1,2
+                select date_trunc('month',"date")::date as month,
+                       coalesce(bank,'UNKNOWN') as bank,
+                       sum({net_expr}) as amount
+                from {relc}
+                where {where_sql}
+                group by 1,2
+                order by 1,2
             """
             df_out = run_df(engine, sql, params, ["Month","Bank","Amount"], rel=relc)
             if df_out.empty:
@@ -487,9 +433,7 @@ where_sql = " and ".join(where) if where else "1=1"
         show_df(run_df(engine, sql, params, ["Bank","Direction","Amount"], rel=relc), label_col="Bank")
         return
 
-    # -----------------------------
-    # Trial Balance
-    # -----------------------------
+    # ---- Trial Balance
     if intent == "trial_balance":
         st.subheader("Trial Balance" + (f" (As of {params.get('dt')})" if asof else ""))
         relt = rel0
@@ -504,46 +448,34 @@ where_sql = " and ".join(where) if where else "1=1"
         show_df(run_df(engine, sql, params, ["Account","Balance"], rel=relt), label_col="Account")
         return
 
-    # -----------------------------
-    # Recoup
-    # -----------------------------
+    # ---- Recoup
     if intent == "recoup":
         st.subheader("Recoup")
         state = parse_recoup_state(q)
-
         conds = ["bill_no = 'Recoup'"]
-        # If your semantic view doesn't enforce bank scoping for recoup, uncomment:
-        # conds.append("coalesce(bank,'') = 'Revenue:4069284635'")
-
         if state == "pending":
-            st.caption("Showing: Recoup Pending")
             conds.append("nullif(trim(coalesce(status,'')),'') is null")
         elif state == "completed":
-            st.caption("Showing: Recoup Completed")
             conds.append("nullif(trim(coalesce(status,'')),'') is not null")
 
         sql = f"""
-        select
-          case
-            when nullif(trim(coalesce(status,'')),'') is null then 'pending'
-            else 'completed'
-          end as recoup_state,
-          coalesce(sum(coalesce(debit_payment,0) - coalesce(credit_deposit,0)),0) as amount
-        from {rel0}
-        where {where_sql}
-          and {" and ".join(conds)}
-        group by 1
-        order by 1
+            select
+              case when nullif(trim(coalesce(status,'')),'') is null then 'pending'
+                   else 'completed'
+              end as recoup_state,
+              coalesce(sum(coalesce(debit_payment,0) - coalesce(credit_deposit,0)),0) as amount
+            from {rel0}
+            where {where_sql}
+              and {" and ".join(conds)}
+            group by 1
+            order by 1
         """
         df_out = run_df(engine, sql, params, ["State","Amount"], rel=rel0)
         show_df(df_out, label_col="State")
         return
 
-    # -----------------------------
-    # Search (field-aware)
-    # -----------------------------
+    # ---- Search
     st.subheader("Search (latest rows)")
-
     field, value = parse_field_search(q)
     params2 = dict(params)
 
@@ -565,7 +497,7 @@ where_sql = " and ".join(where) if where else "1=1"
         """
 
     base_cols = ['"date"', "bank", "account", "head_name", "pay_to", "description"]
-    optional_cols = ["debit_payment", "credit_deposit", "gl_amount", "net_flow", "bill_no", "status", "voucher_no", "reference_no", "func_code", "attribute"]
+    optional_cols = ["debit_payment", "credit_deposit", "gl_amount", "net_flow", "bill_no", "status", "func_code", "attribute", "ref", "folio_chq_no"]
     select_cols = []
     for c in base_cols:
         if c == '"date"' or has_column(engine, rel0, c):
