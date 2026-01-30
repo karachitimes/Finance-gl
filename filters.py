@@ -1,21 +1,29 @@
 import streamlit as st
 from datetime import date
 from sqlalchemy import text
+from db import get_engine
 
 from semantic import get_source_relation
 
 # -------------------------------------------------
 # Distinct lists for filters
 # -------------------------------------------------
-@st.cache_data(ttl=3600)
-def get_distinct(engine, rel: str, col: str):
-    allowed = {"pay_to","func_code","bank","account","attribute","head_name","bill_no","status"}
-    if col not in allowed:
-        raise ValueError(f"Unsupported distinct column: {col}")
-    q = text(f"SELECT DISTINCT {col} FROM {rel} WHERE {col} IS NOT NULL ORDER BY {col}")
-    with engine.connect() as conn:
-        return [r[0] for r in conn.execute(q).fetchall()]
 
+def get_source_relation(engine) -> str:
+    # keep signature so callers don't change
+    # but NEVER cache engine
+    return get_source_relation_cached()
+@st.cache_data(ttl=300)
+def get_source_relation_cached() -> str:
+    engine = get_engine()
+    with engine.connect() as conn:
+        # example logic — keep your real logic here
+        try:
+            conn.execute(text("select 1 from public.v_finance_semantic limit 1"))
+            return "public.v_finance_semantic"
+        except Exception:
+            return "public.gl_register"
+            
 @st.cache_data(ttl=3600)
 def get_distinct_years(engine, rel: str) -> list[int]:
     q = text(f'SELECT DISTINCT EXTRACT(YEAR FROM "date")::int AS year FROM {rel} ORDER BY year')
