@@ -51,26 +51,59 @@ def best_payee_match(name: str | None, known_payees: list[str]):
 
 def detect_intent(q: str) -> str:
     ql = q.lower()
+
+    # NOTE: order matters. If someone asks "expense ... not recoup", it's still an expense question.
     if "trial balance" in ql or "tb" in ql or "balance as of" in ql:
         return "trial_balance"
     if "cashflow" in ql or "cash flow" in ql:
         return "cashflow"
-    if "recoup" in ql:
-        return "recoup"
     if any(w in ql for w in ["revenue", "income", "grant"]):
         return "revenue"
     if any(w in ql for w in ["expense", "cost", "paid", "payment", "wages", "salary"]):
         return "expense"
+
+    # Recoup intent only when the user is truly asking recoup, not using "recoup" as an exclusion.
+    if "recoup" in ql or "recouped" in ql:
+        return "recoup"
+
     return "search"
 
 
-def detect_structure(q: str):
+def detect_structure(q: str):(q: str):
     ql = q.lower()
     return {
         "by_head": ("by head" in ql) or ("head wise" in ql) or ("head-wise" in ql) or ("head" in ql and "by" in ql),
         "by_bank": ("by bank" in ql) or ("bank wise" in ql) or ("bank-wise" in ql) or ("bank" in ql and "by" in ql),
         "monthly": ("monthly" in ql) or ("per month" in ql) or ("month wise" in ql) or ("month-wise" in ql) or ("trend" in ql),
         "top": ("top" in ql) or ("highest" in ql) or ("largest" in ql),
+    }
+
+
+
+def detect_modifiers(q: str):
+    """Extra switches inside the question, e.g. 'not recoup', 'pending', 'completed'."""
+    ql = q.lower()
+
+    exclude_recoup = any(
+        p in ql
+        for p in [
+            "not recoup",
+            "no recoup",
+            "exclude recoup",
+            "without recoup",
+            "bill_no not recoup",
+            "bill no not recoup",
+            "billno not recoup",
+        ]
+    )
+
+    only_pending = ("pending" in ql) and ("recoup" in ql)
+    only_completed = ("completed" in ql) and ("recoup" in ql)
+
+    return {
+        "exclude_recoup": exclude_recoup,
+        "only_pending": only_pending,
+        "only_completed": only_completed,
     }
 
 
@@ -139,6 +172,7 @@ def render_qa_tab(engine, f, *, rel: str):
     known_payees = get_known_payees(engine, rel0)
     intent = detect_intent(q)
     struct = detect_structure(q)
+    modifiers = detect_modifiers(q)
     payee = extract_payee(q, known_payees)
     func_override = apply_intent_func_override(intent, q)
 
@@ -163,6 +197,20 @@ def render_qa_tab(engine, f, *, rel: str):
     if payee:
         where.append("pay_to ilike :payee")
         params["payee"] = f"%{payee}%"
+
+    # --- modifiers (e.g., exclude recoup / pending / completed) ---
+    if modifiers.get("exclude_recoup"):
+        # Exclude Recoup rows (workflow label) from expense/search questions
+        where.append("coalesce(bill_no,'') <> 'Recoup'")
+
+    if intent == "recoup":
+        # Narrow recoup intent when user says pending/completed
+        if modifiers.get("only_pending"):
+            where.append("coalesce(bill_no,'') = 'Recoup' and nullif(trim(coalesce(status,'')),'') is null")
+        elif modifiers.get("only_completed"):
+            where.append("coalesce(bill_no,'') = 'Recoup' and nullif(trim(coalesce(status,'')),'') is not null")
+        else:
+            where.append("coalesce(bill_no,'') = 'Recoup'")
 
     where_sql = " and ".join(where) if where else "1=1"
 
@@ -278,7 +326,10 @@ def render_qa_tab(engine, f, *, rel: str):
 
     st.subheader("Search (latest rows)")
     params2 = dict(params)
-    params2["q"] = f"%{q.strip()}%"
+    term = q.strip()
+    if term.lower().startswith('search '):
+        term = term[7:].strip() or q.strip()
+    params2["q"] = f"%{term}%"
     sql = f"""
         select "date", bank, account, head_name, pay_to, description
         from {rel0}

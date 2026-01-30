@@ -7,12 +7,13 @@ from filters import render_filter_bar, build_where_from_ui
 from dashboards import render_revenue_tab, render_expense_tab, render_cashflow_tab, render_trial_balance_tab
 from recoup import render_recoup_kpi_tab
 from qa import render_qa_tab
+from search import render_search_tab
 
 # -------------------------------------------------
 # PAGE CONFIG
 # -------------------------------------------------
-st.set_page_config(page_title="KoFHA Finance Analytics System by Naushad Anwar", layout="wide")
-st.title("📊 KoFHA Finance Analytics System")
+st.set_page_config(page_title="Finance Analytics System", layout="wide")
+st.title("📊 Finance Analytics System")
 
 engine = get_engine()
 
@@ -50,8 +51,8 @@ rel = get_source_relation(engine)
 # -------------------------------------------------
 # TABS
 # -------------------------------------------------
-tab_rev, tab_exp, tab_cf, tab_tb, tab_rec_kpi, tab_qa = st.tabs(
-    ["Revenue","Expense","Cashflow","Trial Balance","Recoup KPIs","AI Q&A"]
+tab_rev, tab_exp, tab_cf, tab_tb, tab_rec_kpi, tab_qa, tab_search = st.tabs(
+    ["Revenue","Expense","Cashflow","Trial Balance","Recoup KPIs","AI Q&A","Search"]
 )
 
 with tab_rev:
@@ -71,3 +72,7 @@ with tab_rec_kpi:
 
 with tab_qa:
     render_qa_tab(engine, f, rel=rel)
+
+
+with tab_search:
+    render_search_tab(engine, f, rel=rel)
