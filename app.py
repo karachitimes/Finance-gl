@@ -58,7 +58,7 @@ rel = get_source_relation(engine)
 # -------------------------------------------------
 tab_rev, tab_exp, tab_cf, tab_tb, tab_rec_kpi, \
 tab_rev_intel, tab_exp_intel, tab_ai, \
-tab_qa, tab_search, tab_forecast, tab_scenario, tab_policy, tab_twin = st.tabs([
+tab_qa, tab_search, tab_forecast, tab_scenario, tab_policy = st.tabs([
     "Revenue",
     "Expense",
     "Cashflow",
