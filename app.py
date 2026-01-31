@@ -4,15 +4,25 @@ from sqlalchemy.exc import OperationalError
 from db import get_engine, test_connection
 from semantic import get_source_relation
 from filters import render_filter_bar, build_where_from_ui
-from dashboards import render_revenue_tab, render_expense_tab, render_cashflow_tab, render_trial_balance_tab
+
+from dashboards import (
+    render_revenue_tab,
+    render_expense_tab,
+    render_cashflow_tab,
+    render_trial_balance_tab,
+)
+
 from recoup import render_recoup_kpi_tab
 from qa import render_qa_tab
 from search import render_search_tab
+
 from revenue_intelligence import render_revenue_intelligence
 from expense_intelligence import render_expense_intelligence
+
 from forecast_engine import render_forecast_engine
 from scenario_engine import render_scenario_engine
 from policy_engine import render_policy_engine
+
 from ai.ai_dashboard import render_ai_dashboard
 from intelligence_cockpit import render_intelligence_cockpit
 from billing import render_billing_tab
@@ -47,7 +57,7 @@ f = render_filter_bar(engine)
 
 # Build a base where_sql+params that other modules can reuse
 where, params, _ = build_where_from_ui(
-    f["df"], f["dt"], f["bank"], f["head"], f["account"], f["attribute"], f["func_code"],
+    f["df"], f["dt"], f["bank"], f["head"], f["account"], f["attribute"], f["func_code"], f["bill_no"],
     fy_label=f["fy_label"], func_override=None
 )
 where_sql = " and ".join(where) if where else "1=1"
