@@ -107,7 +107,6 @@ with tab_exp_intel:
 with tab_ai:
     render_ai_dashboard(engine, f, rel=rel)
 
-
 with tab_risk:
     render_risk_engine(engine, f, rel=rel)
 
