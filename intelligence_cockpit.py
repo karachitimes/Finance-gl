@@ -5,9 +5,7 @@ import pandas as pd
 from db import run_df, run_scalar
 from semantic import get_source_relation
 from utils import show_df
-from ai.anomaly_engine import detect_anomalies
-
-
+\1from ai.explain_panel import render_explain_panel
 def _money(x):
     try:
         return f"{float(x):,.0f}"
@@ -162,16 +160,18 @@ def render_intelligence_cockpit(engine, f, *, rel=None):
 
     sensitivity = st.slider("Anomaly sensitivity", 2.5, 6.0, 3.5, 0.1)
     df_anom = df_exp_m.rename(columns={"amount": "expense"})
-    try:
-        df_anom = detect_anomalies(df_anom, "expense", z=sensitivity)
-    except TypeError:
-        # older anomaly_engine signature (no z parameter)
-        df_anom = detect_anomalies(df_anom, "expense")
+try:
+    df_anom = detect_anomalies(df_anom, "expense", z=sensitivity)
+except TypeError:
+    # older anomaly_engine signature (no z parameter)
+    df_anom = detect_anomalies(df_anom, "expense")
 
     anom_count = int(df_anom["is_anomaly"].sum())
     st.metric("Anomalous months detected", anom_count)
 
     show_df(df_anom[df_anom["is_anomaly"]].sort_values("month", ascending=False))
+    # Drill-down: why anomaly happened
+    render_explain_panel(engine, f, rel=rel0, df_anom=df_anom)
 
     st.divider()
 
