@@ -14,6 +14,8 @@ from forecast_engine import render_forecast_engine
 from scenario_engine import render_scenario_engine
 from policy_engine import render_policy_engine
 from ai.ai_dashboard import render_ai_dashboard
+from intelligence_cockpit import render_intelligence_cockpit
+
 # -------------------------------------------------
 # PAGE CONFIG
 # -------------------------------------------------
@@ -57,7 +59,7 @@ rel = get_source_relation(engine)
 # TABS
 # -------------------------------------------------
 tab_rev, tab_exp, tab_cf, tab_tb, tab_rec_kpi, \
-tab_rev_intel, tab_exp_intel, tab_ai, \
+tab_rev_intel, tab_exp_intel, tab_intel, tab_ai, \
 tab_qa, tab_search, tab_forecast, tab_scenario, tab_policy = st.tabs([
     "Revenue",
     "Expense",
@@ -66,6 +68,7 @@ tab_qa, tab_search, tab_forecast, tab_scenario, tab_policy = st.tabs([
     "Recoup KPIs",
     "Revenue Intelligence",
     "Expense Intelligence",
+    "Intelligence Cockpit",
     "AI Intelligence",
     "AI Q&A",
     "Search",
@@ -95,6 +98,8 @@ with tab_rev_intel:
 
 with tab_exp_intel:
     render_expense_intelligence(engine, f, rel=rel)
+with tab_intel:
+    render_intelligence_cockpit(engine, f, rel=rel)
 
 with tab_ai:
     render_ai_dashboard(engine, f, rel=rel)
