@@ -10,9 +10,8 @@ from qa import render_qa_tab
 from search import render_search_tab
 from revenue_intelligence import render_revenue_intelligence
 from expense_intelligence import render_expense_intelligence
-from risk_engine import render_risk_engine
-from health_scores import render_health_scores
-from executive_dashboard import render_executive_dashboard
+
+
 from forecast_engine import render_forecast_engine
 from scenario_engine import render_scenario_engine
 from policy_engine import render_policy_engine
@@ -61,7 +60,7 @@ rel = get_source_relation(engine)
 # TABS
 # -------------------------------------------------
 tab_rev, tab_exp, tab_cf, tab_tb, tab_rec_kpi, \
-tab_rev_intel, tab_exp_intel, tab_ai, tab_risk, tab_health, tab_exec, \
+tab_rev_intel, tab_exp_intel, tab_ai, \
 tab_qa, tab_search, tab_forecast, tab_scenario, tab_policy, tab_twin = st.tabs([
     "Revenue",
     "Expense",
@@ -71,15 +70,12 @@ tab_qa, tab_search, tab_forecast, tab_scenario, tab_policy, tab_twin = st.tabs([
     "Revenue Intelligence",
     "Expense Intelligence",
     "AI Intelligence",
-    "Risk Engine",
-    "Health Scores",
-    "Executive Dashboard",
     "AI Q&A",
     "Search",
     "Forecast Engine",
     "Scenario Engine",
-    "Policy Engine",
-    "Digital Twin"
+    "Policy Engine"
+
 ])
 
 with tab_rev:
@@ -106,15 +102,6 @@ with tab_exp_intel:
 with tab_ai:
     render_ai_dashboard(engine, f, rel=rel)
 
-with tab_risk:
-    render_risk_engine(engine, f, rel=rel)
-
-with tab_health:
-    render_health_scores(engine, f, rel=rel)
-
-with tab_exec:
-    render_executive_dashboard(engine, f, rel=rel)
-
 with tab_qa:
     render_qa_tab(engine, f, rel=rel)
 
@@ -128,6 +115,3 @@ with tab_scenario:
 
 with tab_policy:
     render_policy_engine(engine, f, rel=rel)
-
-with tab_twin:
-    render_digital_twin(engine, f, rel=rel)
