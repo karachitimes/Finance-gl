@@ -28,16 +28,33 @@ def _aging_bucket(days: float):
     return "180+"
 
 
-def _try_has_column(engine, rel, f, col: str) -> bool:
-    """Return True if relation has column; avoids hard-failing on unknown schemas."""
-    where_sql = f.get("where_sql", "1=1")
-    params = dict(f.get("params", {}))
-    sql = f'''select {col} from {rel} where {where_sql} limit 1'''
+def _split_relation(rel: str):
+    r = (rel or "").strip()
+    if "." in r:
+        schema, name = r.split(".", 1)
+        return schema.strip('"'), name.strip('"')
+    return "public", r.strip('"')
+
+
+def _get_columns(engine, rel: str) -> set[str]:
+    schema, name = _split_relation(rel)
+    sql = """
+        select column_name
+        from information_schema.columns
+        where table_schema = %(schema)s
+          and table_name = %(name)s
+    """
     try:
-        _ = run_df(engine, sql, params, rel=rel)
-        return True
+        df = run_df(engine, sql, {"schema": schema, "name": name}, rel=None)
+        if df is None or df.empty:
+            return set()
+        return set(df["column_name"].astype(str))
     except Exception:
-        return False
+        return set()
+
+
+def _col_or_literal(cols: set[str], col: str, literal_sql: str):
+    return col if col in cols else f"{literal_sql} as {col}"
 
 
 def _billing_stream_from_head(head: str) -> str:
@@ -46,14 +63,6 @@ def _billing_stream_from_head(head: str) -> str:
         if s in h:
             return s
     return "OTHER"
-
-
-def _infer_key_mode_choice(df: pd.DataFrame) -> str:
-    """Prefer account-ledger mode when PAR/WAR/AMC/AGR dominate."""
-    if df is None or df.empty or "billing_stream" not in df.columns:
-        return "auto"
-    share = (df["billing_stream"].isin(PAR_STREAMS).mean()) if len(df) else 0.0
-    return "account-ledger" if share >= 0.30 else "auto"
 
 
 def render_billing_tab(engine, f, *, rel):
@@ -67,8 +76,12 @@ def render_billing_tab(engine, f, *, rel):
     where_sql = f.get("where_sql", "1=1")
     params = dict(f.get("params", {}))
 
-    # ---- Detect reconcile column for bank timeline ----
-    has_reconcile = _try_has_column(engine, rel, f, "reconcile")
+    cols = _get_columns(engine, rel)
+    if not cols:
+        st.warning("Could not read relation columns from information_schema. Falling back to minimal selection.")
+        cols = set()
+
+    has_reconcile = "reconcile" in cols
     date_basis = st.radio(
         "Date basis",
         ["Accounting date (date)"] + (["Bank reconciliation (reconcile)"] if has_reconcile else []),
@@ -77,7 +90,6 @@ def render_billing_tab(engine, f, *, rel):
     if not has_reconcile:
         st.info("Bank reconciliation timeline not available (column 'reconcile' not found).")
 
-    # ---- Filters ----
     bill_like = st.text_input("Filter bill_no contains", value="")
     if bill_like.strip():
         where_bill = "and coalesce(bill_no,'') ilike %(bill_like)s"
@@ -85,19 +97,28 @@ def render_billing_tab(engine, f, *, rel):
     else:
         where_bill = ""
 
-    # ---- Sample ledger rows (lightweight, used for classification) ----
-    cols = ["date", "head_name", "subhead1", "account", "bill_no", "folio_chq_no", "bank", "debit_payment", "credit_deposit"]
-    col_sql = ", ".join([f'"{c}"' if c == "date" else c for c in cols])
+    # Build SELECT list safely (undefined columns become literals)
+    sel = []
+    sel.append(_col_or_literal(cols, "date", "null::date"))
+    sel.append(_col_or_literal(cols, "head_name", "''"))
+    sel.append(_col_or_literal(cols, "subhead1", "''"))
+    sel.append(_col_or_literal(cols, "account", "''"))
+    sel.append(_col_or_literal(cols, "bill_no", "''"))
+    sel.append(_col_or_literal(cols, "folio_chq_no", "''"))
+    sel.append(_col_or_literal(cols, "bank", "''"))
+    sel.append(_col_or_literal(cols, "debit_payment", "0::numeric"))
+    sel.append(_col_or_literal(cols, "credit_deposit", "0::numeric"))
     if has_reconcile:
-        col_sql += ", reconcile"
+        sel.append("reconcile")
 
     sql_sample = f"""
-        select {col_sql}
+        select {", ".join(sel)}
         from {rel}
         where {where_sql}
         {where_bill}
         limit 5000
     """
+
     df0 = run_df(engine, sql_sample, params, rel=rel)
     if df0 is None or df0.empty:
         st.warning("No billing ledger rows found under current filters.")
@@ -116,64 +137,44 @@ def render_billing_tab(engine, f, *, rel):
     df0["billing_stream"] = df0["head_name"].apply(_billing_stream_from_head)
     df0["is_grant"] = df0["subhead1"].str.contains("Government Grant", case=False, na=False)
     df0["is_indirect_income"] = (
-        df0["subhead1"].str.contains("Income \(Indirect/Opr\.", case=False, na=False)
-        | df0["subhead1"].str.contains("Income \(Indirect/Opr\)", case=False, na=False)
+        df0["subhead1"].str.contains("Income \(Indirect/Opr", case=False, na=False)
     )
 
     df0["date"] = pd.to_datetime(df0["date"], errors="coerce")
     if has_reconcile:
         df0["reconcile"] = pd.to_datetime(df0["reconcile"], errors="coerce")
 
-    # ---- Reconciliation key ----
+    # Reconciliation key selection
     st.divider()
     st.markdown("## 🔗 Reconciliation key")
 
-    suggested = _infer_key_mode_choice(df0)
     key_mode = st.selectbox(
         "How to reconcile (logical bill key)",
-        ["auto", "bill_no only", "bill_no + pay_to", "bill_no + account", "account-ledger (account + subhead1)"],
-        index=0
+        ["bill_no only", "bill_no + account", "account-ledger (account + subhead1)"],
+        index=1
     )
-    if key_mode == "auto":
-        st.caption(f"Auto suggestion based on data: **{suggested}**")
 
-    if key_mode == "auto":
-        key_mode_effective = "account-ledger (account + subhead1)" if suggested == "account-ledger" else "bill_no + account"
-    else:
-        key_mode_effective = key_mode
-
-    # key builder
-    if key_mode_effective == "account-ledger (account + subhead1)":
+    if key_mode == "account-ledger (account + subhead1)":
         df0["bill_key"] = df0["account"].str.strip() + " | " + df0["subhead1"].str.strip()
-    elif key_mode_effective == "bill_no only":
-        df0["bill_key"] = df0["bill_no"].str.strip()
-    elif key_mode_effective == "bill_no + account":
+    elif key_mode == "bill_no + account":
         df0["bill_key"] = df0["bill_no"].str.strip() + " | " + df0["account"].str.strip()
-    elif key_mode_effective == "bill_no + pay_to":
-        if "pay_to" in df0.columns:
-            df0["bill_key"] = df0["bill_no"].str.strip() + " | " + df0["pay_to"].astype(str).str.strip()
-        else:
-            df0["bill_key"] = df0["bill_no"].str.strip()
-            st.info("Column pay_to not found; fallback to bill_no only.")
     else:
         df0["bill_key"] = df0["bill_no"].str.strip()
 
-    # ---- Grants separated from ordinary receipts ----
+    # Grants separated
     st.divider()
     st.markdown("## 🏷 Income classification (Grants vs Ordinary)")
 
     receipts_total = float(df0.loc[df0["credit_deposit"] > 0, "credit_deposit"].sum())
     grant_receipts = float(df0.loc[(df0["credit_deposit"] > 0) & (df0["is_grant"]), "credit_deposit"].sum())
-    ordinary_receipts = receipts_total - grant_receipts
     grant_ratio = (grant_receipts / receipts_total * 100.0) if receipts_total else 0.0
 
     c1, c2, c3 = st.columns(3)
     c1.metric("Receipts total", _money(receipts_total))
     c2.metric("Grant receipts", _money(grant_receipts))
     c3.metric("Grant dependency %", f"{grant_ratio:.1f}%")
-    st.caption("Government Grant is reported separately from ordinary income streams.")
 
-    # ---- Indirect income rollups ----
+    # Indirect income rollups
     st.divider()
     st.markdown("## 🧩 Indirect/Opr income rollups (subhead1 → head_name → account)")
 
@@ -181,35 +182,25 @@ def render_billing_tab(engine, f, *, rel):
     if df_ind.empty:
         st.info("No rows found under subhead1 = Income (Indirect/Opr.) within current filters.")
     else:
-        roll1 = df_ind.groupby(["subhead1"], as_index=False).agg(
-            receipts=("credit_deposit", "sum"),
-            rows=("credit_deposit", "size"),
-        ).sort_values("receipts", ascending=False)
-        st.markdown("### By subhead1")
-        show_df(roll1)
-
         roll2 = df_ind.groupby(["subhead1", "head_name"], as_index=False).agg(
             receipts=("credit_deposit", "sum"),
             rows=("credit_deposit", "size"),
         ).sort_values("receipts", ascending=False)
-        st.markdown("### By subhead1 → head_name")
         show_df(roll2.head(200))
 
         roll3 = df_ind.groupby(["subhead1", "head_name", "account"], as_index=False).agg(
             receipts=("credit_deposit", "sum"),
             rows=("credit_deposit", "size"),
         ).sort_values("receipts", ascending=False)
-        st.markdown("### By subhead1 → head_name → account")
         show_df(roll3.head(300))
 
-    # ---- Ledger reconciliation ----
+    # Ledger reconciliation
     st.divider()
     st.markdown("## 📚 Billing ledger reconciliation (issued vs received vs outstanding)")
 
     df_led = df0[(df0["debit_payment"] != 0) | (df0["credit_deposit"] != 0)].copy()
-
-    # Force PAR/WAR/AMC/AGR routing to account-ledger key
     df_led["bill_key_routed"] = df_led["bill_key"]
+
     par_mask = df_led["billing_stream"].isin(PAR_STREAMS)
     df_led.loc[par_mask, "bill_key_routed"] = df_led.loc[par_mask, "account"].str.strip() + " | " + df_led.loc[par_mask, "subhead1"].str.strip()
 
@@ -224,7 +215,6 @@ def render_billing_tab(engine, f, *, rel):
     )
     agg["outstanding"] = agg["issued"] - agg["received"]
 
-    # Aging basis
     if ("Bank reconciliation" in date_basis) and has_reconcile:
         base_dt = pd.to_datetime(agg["last_reconcile"], errors="coerce")
     else:
@@ -234,7 +224,6 @@ def render_billing_tab(engine, f, *, rel):
     agg["days_since"] = (today - base_dt).dt.days
     agg["aging_bucket"] = agg["days_since"].apply(_aging_bucket)
 
-    st.markdown("### Top outstanding")
     show_df(agg.sort_values("outstanding", ascending=False).head(200))
 
     st.markdown("### Aging bucket totals (outstanding)")
@@ -244,7 +233,7 @@ def render_billing_tab(engine, f, *, rel):
     ).sort_values("aging_bucket")
     show_df(buckets)
 
-    # ---- Control flags ----
+    # Controls
     st.divider()
     st.markdown("## 🧾 Controls & exceptions")
 
@@ -256,7 +245,7 @@ def render_billing_tab(engine, f, *, rel):
     st.markdown("### Receipts missing receipt no (folio_chq_no)")
     show_df(missing_receipt_no.sort_values("date", ascending=False).head(300))
 
-    # ---- Deposit routing ----
+    # Deposit routing
     st.divider()
     st.markdown("## 🏦 Deposit routing (bank)")
 
