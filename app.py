@@ -15,6 +15,7 @@ from scenario_engine import render_scenario_engine
 from policy_engine import render_policy_engine
 from ai.ai_dashboard import render_ai_dashboard
 from intelligence_cockpit import render_intelligence_cockpit
+from billing import render_billing_tab
 
 # -------------------------------------------------
 # PAGE CONFIG
@@ -86,7 +87,8 @@ with tab_exp:
 
 with tab_cf:
     render_cashflow_tab(engine, f)
-
+with tab_billing:
+    render_billing_tab(engine, f, rel=rel)
 with tab_tb:
     render_trial_balance_tab(engine, f)
 
