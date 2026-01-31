@@ -15,7 +15,6 @@ from expense_intelligence import render_expense_intelligence
 from forecast_engine import render_forecast_engine
 from scenario_engine import render_scenario_engine
 from policy_engine import render_policy_engine
-from digital_twin import render_digital_twin
 from ai.ai_dashboard import render_ai_dashboard
 # -------------------------------------------------
 # PAGE CONFIG
