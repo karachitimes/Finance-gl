@@ -162,11 +162,11 @@ def render_intelligence_cockpit(engine, f, *, rel=None):
 
     sensitivity = st.slider("Anomaly sensitivity", 2.5, 6.0, 3.5, 0.1)
     df_anom = df_exp_m.rename(columns={"amount": "expense"})
-try:
-    df_anom = detect_anomalies(df_anom, "expense", z=sensitivity)
-except TypeError:
-    # older anomaly_engine signature (no z parameter)
-    df_anom = detect_anomalies(df_anom, "expense")
+    try:
+        df_anom = detect_anomalies(df_anom, "expense", z=sensitivity)
+    except TypeError:
+        # older anomaly_engine signature (no z parameter)
+        df_anom = detect_anomalies(df_anom, "expense")
 
     anom_count = int(df_anom["is_anomaly"].sum())
     st.metric("Anomalous months detected", anom_count)
