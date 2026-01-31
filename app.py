@@ -57,7 +57,7 @@ f = render_filter_bar(engine)
 
 # Build a base where_sql+params that other modules can reuse
 where, params, _ = build_where_from_ui(
-    f["df"], f["dt"], f["bank"], f["head"], f["account"], f["attribute"], f["func_code"], f["bill_no"],
+    f["df"], f["dt"], f["bank"], f["head"], f["account"], f["attribute"], f["func_code"],
     fy_label=f["fy_label"], func_override=None
 )
 where_sql = " and ".join(where) if where else "1=1"
