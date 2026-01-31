@@ -80,6 +80,7 @@ tab_qa, tab_search, tab_forecast, tab_scenario, tab_policy = st.tabs([
     "Revenue Intelligence",
     "Expense Intelligence",
     "Intelligence Cockpit",
+    "Billing",
     "AI Intelligence",
     "AI Q&A",
     "Search",
