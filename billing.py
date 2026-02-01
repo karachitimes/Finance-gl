@@ -73,8 +73,18 @@ def render_billing_tab(engine, f, *, rel):
         "Government Grant is reported separately from ordinary income."
     )
 
-    where_sql = f.get("where_sql", "1=1")
-    params = dict(f.get("params", {}))
+    # with this:
+    params = {}
+    where = ['"date" between %(df)s and %(dt)s']
+    params["df"] = f["df"]
+    params["dt"] = f["dt"]
+    
+    # optional bank-only filter (safe for billing)
+    if f.get("bank"):
+        where.append("bank = %(bank)s")
+        params["bank"] = f["bank"]
+    
+    where_sql = " and ".join(where)
 
     cols = _get_columns(engine, rel)
     if not cols:
