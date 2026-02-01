@@ -49,7 +49,7 @@ def render_expense_tab(engine, f):
     rel_exp = pick_view(engine, REL_EXP, rel_sem)
 
     where, params, _ = build_where_from_ui(
-        f["df"], f["dt"], f["bank"], f["head"], f["account"], f["attribute"], f["func_code"],
+        f["df"], f["dt"], f["bank"], f["head"], f["head_no"],f["account"], f["attribute"], f["func_code"],
         fy_label=f["fy_label"], func_override=None
     )
     where_sql = " and ".join(where) if where else "1=1"
