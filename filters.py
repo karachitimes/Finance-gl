@@ -56,7 +56,7 @@ def get_distinct_years(engine, rel: str) -> list[int]:
 USE_UI = object()  # sentinel
 
 def build_where_from_ui(
-    df, dt, bank, head, account, attribute, func_code,
+    df, dt, bank, head, head_no, account, attribute, func_code,
     *, fy_label: str | None = None, func_override=USE_UI
 ):
     where = []
@@ -79,6 +79,8 @@ def build_where_from_ui(
 
     if bank != "ALL":
         where.append("bank = :bank"); params["bank"] = bank
+    if head_no != "ALL":
+        where.append('"head_no" = :head_no'); params["head_no"] = head_no
     if head != "ALL":
         where.append("head_name = :head_name"); params["head_name"] = head
     if account != "ALL":
