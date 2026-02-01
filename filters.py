@@ -169,6 +169,7 @@ def render_filter_bar(engine):
         st.session_state["df"] = new_df
         st.session_state["dt"] = new_dt
         st.session_state["bank"] = new_bank
+        st.session_state["head_no"] = new_head_no
         st.session_state["head"] = new_head
         st.session_state["account"] = new_account
         st.session_state["attribute"] = new_attribute
@@ -179,6 +180,7 @@ def render_filter_bar(engine):
         "df": st.session_state["df"],
         "dt": st.session_state["dt"],
         "bank": st.session_state["bank"],
+        "head_no": st.session_state["head_no"],
         "head": st.session_state["head"],
         "account": st.session_state["account"],
         "attribute": st.session_state["attribute"],
