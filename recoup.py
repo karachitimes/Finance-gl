@@ -48,7 +48,7 @@ def render_recoup_intelligence_tab(engine, f, *, rel: str):
 
     # Filters
     where, params, _ = build_where_from_ui(
-        f["df"], f["dt"], f["bank"], f["head"], f["account"],
+        f["df"], f["dt"], f["bank"], f["head"], f["head_no"], f["account"],
         f["attribute"], f["func_code"],
         fy_label=f["fy_label"], func_override=None
     )
