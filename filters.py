@@ -113,6 +113,8 @@ def ensure_default_state():
         st.session_state["dt"] = date.today()
     if "bank" not in st.session_state:
         st.session_state["bank"] = "ALL"
+    if "head_no" not in st.session_state:
+        st.session_state["head_no"] = "ALL"
     if "head" not in st.session_state:
         st.session_state["head"] = "ALL"
     if "account" not in st.session_state:
