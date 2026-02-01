@@ -23,6 +23,23 @@ def show_df(df: pd.DataFrame, *, label_col: str | None = None, total_label: str 
         out = pd.concat([out, pd.DataFrame([total_row])], ignore_index=True)
     st.dataframe(out, use_container_width=True)
 
+def drill_panel(engine, rel, base_where, base_params, *, title, drill_col, drill_value):
+    st.markdown(f"### 🔎 Drill-down: {title}")
+    where = base_where + [f'"{drill_col}" = :drill_value']
+    params = dict(base_params)
+    params["drill_value"] = drill_value
+
+    sql = f"""
+        select *
+        from {rel}
+        where {' and '.join(where)}
+        order by "date" desc
+        limit 5000
+    """
+    df = run_df(engine, sql, params, rel=rel)
+    show_df(df)
+
+
 def show_pivot(pivot: pd.DataFrame, total_label: str = "TOTAL"):
     if pivot is None or pivot.empty:
         st.info("No rows for selected filters.")
