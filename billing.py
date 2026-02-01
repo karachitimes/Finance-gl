@@ -1,4 +1,3 @@
-
 import streamlit as st
 import pandas as pd
 from datetime import date
@@ -21,10 +20,14 @@ def _aging_bucket(days: float):
     if days is None or pd.isna(days):
         return "unknown"
     d = float(days)
-    if d <= 30: return "0-30"
-    if d <= 60: return "31-60"
-    if d <= 90: return "61-90"
-    if d <= 180: return "91-180"
+    if d <= 30:
+        return "0-30"
+    if d <= 60:
+        return "31-60"
+    if d <= 90:
+        return "61-90"
+    if d <= 180:
+        return "91-180"
     return "180+"
 
 
@@ -53,8 +56,26 @@ def _get_columns(engine, rel: str) -> set[str]:
         return set()
 
 
+def _probe_columns(engine, rel: str, candidates: list[str]) -> set[str]:
+    """
+    Fallback when information_schema is not accessible.
+    Tries a LIMIT 1 query per candidate column and keeps the ones that work.
+    """
+    found: set[str] = set()
+    for c in candidates:
+        sql = f'select "{c}" from {rel} limit 1'
+        try:
+            _ = run_df(engine, sql, {}, rel=None)
+            found.add(c)
+        except Exception:
+            pass
+    return found
+
+
 def _col_or_literal(cols: set[str], col: str, literal_sql: str):
-    return col if col in cols else f"{literal_sql} as {col}"
+    # Quote identifiers to avoid keyword collisions (e.g., date) and to be
+    # resilient to mixed-case / special-char column names.
+    return f'"{col}"' if col in cols else f"{literal_sql} as {col}"
 
 
 def _billing_stream_from_head(head: str) -> str:
@@ -73,39 +94,74 @@ def render_billing_tab(engine, f, *, rel):
         "Government Grant is reported separately from ordinary income."
     )
 
-    # with this:
-    params = {}
-    where = ['"date" between %(df)s and %(dt)s']
-    params["df"] = f["df"]
-    params["dt"] = f["dt"]
-    
-    # optional bank-only filter (safe for billing)
-    if f.get("bank"):
-        where.append("bank = %(bank)s")
-        params["bank"] = f["bank"]
-    
-    where_sql = " and ".join(where)
-
     cols = _get_columns(engine, rel)
     if not cols:
-        st.warning("Could not read relation columns from information_schema. Falling back to minimal selection.")
-        cols = set()
+        st.warning(
+            "Could not read relation columns from information_schema. Falling back to minimal probing."
+        )
+        cols = _probe_columns(
+            engine,
+            rel,
+            [
+                "date",
+                "reconcile",
+                "head_name",
+                "subhead1",
+                "account",
+                "bill_no",
+                "folio_chq_no",
+                "bank",
+                "debit_payment",
+                "credit_deposit",
+            ],
+        )
 
     has_reconcile = "reconcile" in cols
+
+    # --- Filters (ONLY reference columns that exist) ---
+    params = {"df": f["df"], "dt": f["dt"]}
+
+    # Pick a usable date column for filtering.
+    # If neither exists, we cannot safely filter without throwing a SQL error.
+    if "date" in cols:
+        date_filter_col = '"date"'
+    elif "reconcile" in cols:
+        date_filter_col = '"reconcile"'
+    else:
+        st.error(
+            "Billing tab cannot run because neither 'date' nor 'reconcile' column exists in the relation. "
+            "Fix the view/table (recommended), or map the correct date column."
+        )
+        return
+
+    where = [f"{date_filter_col} between %(df)s and %(dt)s"]
+
+    # optional bank-only filter
+    if f.get("bank"):
+        if "bank" in cols:
+            where.append('"bank" = %(bank)s')
+            params["bank"] = f["bank"]
+        else:
+            st.info("Bank filter ignored because column 'bank' is not present in this relation.")
+
+    where_sql = " and ".join(where)
+
     date_basis = st.radio(
         "Date basis",
         ["Accounting date (date)"] + (["Bank reconciliation (reconcile)"] if has_reconcile else []),
-        horizontal=True
+        horizontal=True,
     )
     if not has_reconcile:
         st.info("Bank reconciliation timeline not available (column 'reconcile' not found).")
 
     bill_like = st.text_input("Filter bill_no contains", value="")
-    if bill_like.strip():
-        where_bill = "and coalesce(bill_no,'') ilike %(bill_like)s"
+    if bill_like.strip() and ("bill_no" in cols):
+        where_bill = "and coalesce(\"bill_no\",'') ilike %(bill_like)s"
         params["bill_like"] = f"%{bill_like.strip()}%"
     else:
         where_bill = ""
+        if bill_like.strip() and ("bill_no" not in cols):
+            st.info("bill_no filter ignored because column 'bill_no' is not present in this relation.")
 
     # Build SELECT list safely (undefined columns become literals)
     sel = []
@@ -119,7 +175,7 @@ def render_billing_tab(engine, f, *, rel):
     sel.append(_col_or_literal(cols, "debit_payment", "0::numeric"))
     sel.append(_col_or_literal(cols, "credit_deposit", "0::numeric"))
     if has_reconcile:
-        sel.append("reconcile")
+        sel.append(_col_or_literal(cols, "reconcile", "null::timestamp"))
 
     sql_sample = f"""
         select {", ".join(sel)}
@@ -129,7 +185,9 @@ def render_billing_tab(engine, f, *, rel):
         limit 5000
     """
 
-    df0 = run_df(engine, sql_sample, params, rel=rel)
+    # We already interpolated the relation name in the SQL; passing rel again
+    # can cause double-substitution in some run_df implementations.
+    df0 = run_df(engine, sql_sample, params, rel=None)
     if df0 is None or df0.empty:
         st.warning("No billing ledger rows found under current filters.")
         return
@@ -146,12 +204,12 @@ def render_billing_tab(engine, f, *, rel):
 
     df0["billing_stream"] = df0["head_name"].apply(_billing_stream_from_head)
     df0["is_grant"] = df0["subhead1"].str.contains("Government Grant", case=False, na=False)
-    df0["is_indirect_income"] = (
-        df0["subhead1"].str.contains("Income \(Indirect/Opr", case=False, na=False)
+    df0["is_indirect_income"] = df0["subhead1"].str.contains(
+        r"Income \(Indirect/Opr", case=False, na=False
     )
 
     df0["date"] = pd.to_datetime(df0["date"], errors="coerce")
-    if has_reconcile:
+    if has_reconcile and ("reconcile" in df0.columns):
         df0["reconcile"] = pd.to_datetime(df0["reconcile"], errors="coerce")
 
     # Reconciliation key selection
@@ -161,7 +219,7 @@ def render_billing_tab(engine, f, *, rel):
     key_mode = st.selectbox(
         "How to reconcile (logical bill key)",
         ["bill_no only", "bill_no + account", "account-ledger (account + subhead1)"],
-        index=1
+        index=1,
     )
 
     if key_mode == "account-ledger (account + subhead1)":
@@ -176,7 +234,9 @@ def render_billing_tab(engine, f, *, rel):
     st.markdown("## 🏷 Income classification (Grants vs Ordinary)")
 
     receipts_total = float(df0.loc[df0["credit_deposit"] > 0, "credit_deposit"].sum())
-    grant_receipts = float(df0.loc[(df0["credit_deposit"] > 0) & (df0["is_grant"]), "credit_deposit"].sum())
+    grant_receipts = float(
+        df0.loc[(df0["credit_deposit"] > 0) & (df0["is_grant"]), "credit_deposit"].sum()
+    )
     grant_ratio = (grant_receipts / receipts_total * 100.0) if receipts_total else 0.0
 
     c1, c2, c3 = st.columns(3)
@@ -192,16 +252,18 @@ def render_billing_tab(engine, f, *, rel):
     if df_ind.empty:
         st.info("No rows found under subhead1 = Income (Indirect/Opr.) within current filters.")
     else:
-        roll2 = df_ind.groupby(["subhead1", "head_name"], as_index=False).agg(
-            receipts=("credit_deposit", "sum"),
-            rows=("credit_deposit", "size"),
-        ).sort_values("receipts", ascending=False)
+        roll2 = (
+            df_ind.groupby(["subhead1", "head_name"], as_index=False)
+            .agg(receipts=("credit_deposit", "sum"), rows=("credit_deposit", "size"))
+            .sort_values("receipts", ascending=False)
+        )
         show_df(roll2.head(200))
 
-        roll3 = df_ind.groupby(["subhead1", "head_name", "account"], as_index=False).agg(
-            receipts=("credit_deposit", "sum"),
-            rows=("credit_deposit", "size"),
-        ).sort_values("receipts", ascending=False)
+        roll3 = (
+            df_ind.groupby(["subhead1", "head_name", "account"], as_index=False)
+            .agg(receipts=("credit_deposit", "sum"), rows=("credit_deposit", "size"))
+            .sort_values("receipts", ascending=False)
+        )
         show_df(roll3.head(300))
 
     # Ledger reconciliation
@@ -212,7 +274,11 @@ def render_billing_tab(engine, f, *, rel):
     df_led["bill_key_routed"] = df_led["bill_key"]
 
     par_mask = df_led["billing_stream"].isin(PAR_STREAMS)
-    df_led.loc[par_mask, "bill_key_routed"] = df_led.loc[par_mask, "account"].str.strip() + " | " + df_led.loc[par_mask, "subhead1"].str.strip()
+    df_led.loc[par_mask, "bill_key_routed"] = (
+        df_led.loc[par_mask, "account"].str.strip()
+        + " | "
+        + df_led.loc[par_mask, "subhead1"].str.strip()
+    )
 
     agg = df_led.groupby(["bill_key_routed"], as_index=False).agg(
         issued=("debit_payment", "sum"),
@@ -237,10 +303,11 @@ def render_billing_tab(engine, f, *, rel):
     show_df(agg.sort_values("outstanding", ascending=False).head(200))
 
     st.markdown("### Aging bucket totals (outstanding)")
-    buckets = agg.groupby("aging_bucket", as_index=False).agg(
-        items=("bill_key_routed", "count"),
-        outstanding=("outstanding", "sum"),
-    ).sort_values("aging_bucket")
+    buckets = (
+        agg.groupby("aging_bucket", as_index=False)
+        .agg(items=("bill_key_routed", "count"), outstanding=("outstanding", "sum"))
+        .sort_values("aging_bucket")
+    )
     show_df(buckets)
 
     # Controls
@@ -259,18 +326,25 @@ def render_billing_tab(engine, f, *, rel):
     st.divider()
     st.markdown("## 🏦 Deposit routing (bank)")
 
-    by_bank = df0[df0["credit_deposit"] > 0].groupby(["bank"], as_index=False).agg(
-        receipts=("credit_deposit", "sum"),
-        rows=("credit_deposit", "size"),
-        with_receipt_no=("folio_chq_no", lambda s: (s.astype(str).str.strip() != "").sum()),
-    ).sort_values("receipts", ascending=False)
+    by_bank = (
+        df0[df0["credit_deposit"] > 0]
+        .groupby(["bank"], as_index=False)
+        .agg(
+            receipts=("credit_deposit", "sum"),
+            rows=("credit_deposit", "size"),
+            with_receipt_no=("folio_chq_no", lambda s: (s.astype(str).str.strip() != "").sum()),
+        )
+        .sort_values("receipts", ascending=False)
+    )
     show_df(by_bank.head(50))
 
     st.markdown("### Potential bank posting mismatch (same routed key across multiple banks)")
     tmp = df0[df0["credit_deposit"] > 0].copy()
     tmp["bill_key_routed"] = tmp["bill_key"]
     par_mask2 = tmp["billing_stream"].isin(PAR_STREAMS)
-    tmp.loc[par_mask2, "bill_key_routed"] = tmp.loc[par_mask2, "account"].str.strip() + " | " + tmp.loc[par_mask2, "subhead1"].str.strip()
+    tmp.loc[par_mask2, "bill_key_routed"] = (
+        tmp.loc[par_mask2, "account"].str.strip() + " | " + tmp.loc[par_mask2, "subhead1"].str.strip()
+    )
 
     bank_mix = tmp.groupby(["bill_key_routed"], as_index=False).agg(
         banks=("bank", lambda s: len(set([x for x in s.astype(str) if x.strip()]))),
