@@ -40,26 +40,22 @@ def _split_relation(rel: str):
 
 
 def _get_columns(engine, rel: str) -> set[str]:
-    schema, name = _split_relation(rel)
-    sql = """
-        select column_name
-        from information_schema.columns
-        where table_schema = %(schema)s
-          and table_name = %(name)s
+    """
+    Reliable: works even if information_schema is blocked.
+    Uses SELECT * LIMIT 0 to fetch column names only.
     """
     try:
-        df = run_df(engine, sql, {"schema": schema, "name": name}, rel=None)
-        if df is None or df.empty:
+        df = run_df(engine, f"select * from {rel} limit 0", {}, rel=None)
+        if df is None:
             return set()
-        return set(df["column_name"].astype(str))
+        return set([str(c) for c in df.columns])
     except Exception:
         return set()
 
 
 def _probe_columns(engine, rel: str, candidates: list[str]) -> set[str]:
     """
-    Fallback when information_schema is not accessible.
-    Tries a LIMIT 1 query per candidate column and keeps the ones that work.
+    Keep as a fallback, but now _get_columns is usually enough.
     """
     found: set[str] = set()
     for c in candidates:
@@ -70,6 +66,7 @@ def _probe_columns(engine, rel: str, candidates: list[str]) -> set[str]:
         except Exception:
             pass
     return found
+
 
 
 def _col_or_literal(cols: set[str], col: str, literal_sql: str):
