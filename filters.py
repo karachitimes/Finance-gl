@@ -139,6 +139,7 @@ def render_filter_bar(engine):
 
         banks = ["ALL"] + get_distinct(engine, rel, "bank")
         heads = ["ALL"] + get_distinct(engine, rel, "head_name")
+        head_nos = ["ALL"] + get_distinct(engine, rel, "head_no")
         accounts = ["ALL"] + get_distinct(engine, rel, "account")
         try:
             attrs = get_distinct(engine, rel, "attribute")
@@ -154,6 +155,7 @@ def render_filter_bar(engine):
             return lst.index(v) if v in lst else 0
 
         new_bank = st.selectbox("Bank", banks, index=_idx(banks, st.session_state["bank"]))
+        new_head_no = st.selectbox("Head No", head_nos, index=_idx(head_nos, st.session_state["head_no"]))
         new_head = st.selectbox("Head", heads, index=_idx(heads, st.session_state["head"]))
         new_account = st.selectbox("Account", accounts, index=_idx(accounts, st.session_state["account"]))
         new_attribute = st.selectbox("Attribute", attrs_list, index=_idx(attrs_list, st.session_state["attribute"]))
