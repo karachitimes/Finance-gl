@@ -31,21 +31,13 @@ def _aging_bucket(days: float):
     return "180+"
 
 
-def _split_relation(rel: str):
-    r = (rel or "").strip()
-    if "." in r:
-        schema, name = r.split(".", 1)
-        return schema.strip('"'), name.strip('"')
-    return "public", r.strip('"')
-
-
 def _get_columns(engine, rel: str) -> set[str]:
     """
     Reliable: works even if information_schema is blocked.
     Uses SELECT * LIMIT 0 to fetch column names only.
     """
     try:
-        df = run_df(engine, f"select * from {rel} limit 0", {}, rel=None)
+        df = run_df(engine, f"select * from {rel} limit 0", {}, rel=rel)
         if df is None:
             return set()
         return set([str(c) for c in df.columns])
@@ -55,23 +47,21 @@ def _get_columns(engine, rel: str) -> set[str]:
 
 def _probe_columns(engine, rel: str, candidates: list[str]) -> set[str]:
     """
-    Keep as a fallback, but now _get_columns is usually enough.
+    Fallback probe: try selecting candidate columns. Useful when LIMIT 0 fails
+    due to permissions or odd view behavior.
     """
     found: set[str] = set()
     for c in candidates:
         sql = f'select "{c}" from {rel} limit 1'
         try:
-            _ = run_df(engine, sql, {}, rel=None)
+            _ = run_df(engine, sql, {}, rel=rel)
             found.add(c)
         except Exception:
             pass
     return found
 
 
-
 def _col_or_literal(cols: set[str], col: str, literal_sql: str):
-    # Quote identifiers to avoid keyword collisions (e.g., date) and to be
-    # resilient to mixed-case / special-char column names.
     return f'"{col}"' if col in cols else f"{literal_sql} as {col}"
 
 
@@ -93,9 +83,7 @@ def render_billing_tab(engine, f, *, rel):
 
     cols = _get_columns(engine, rel)
     if not cols:
-        st.warning(
-            "Could not read relation columns from information_schema. Falling back to minimal probing."
-        )
+        st.warning("Could not read columns via LIMIT 0. Falling back to minimal probing.")
         cols = _probe_columns(
             engine,
             rel,
@@ -110,16 +98,19 @@ def render_billing_tab(engine, f, *, rel):
                 "bank",
                 "debit_payment",
                 "credit_deposit",
+                "description",
+                "ref",
+                "pay_to",
+                "head_no",
             ],
         )
 
     has_reconcile = "reconcile" in cols
 
-    # --- Filters (ONLY reference columns that exist) ---
+    # --- Filters ---
     params = {"df": f["df"], "dt": f["dt"]}
 
     # Pick a usable date column for filtering.
-    # If neither exists, we cannot safely filter without throwing a SQL error.
     if "date" in cols:
         date_filter_col = '"date"'
     elif "reconcile" in cols:
@@ -131,17 +122,17 @@ def render_billing_tab(engine, f, *, rel):
         )
         return
 
-    where = [f"{date_filter_col} between %(df)s and %(dt)s"]
+    where = [f"{date_filter_col} between :df and :dt"]
 
     # optional bank-only filter
-    if f.get("bank"):
+    if f.get("bank") and f["bank"] != "ALL":
         if "bank" in cols:
-            where.append('"bank" = %(bank)s')
+            where.append('"bank" = :bank')
             params["bank"] = f["bank"]
         else:
             st.info("Bank filter ignored because column 'bank' is not present in this relation.")
 
-    where_sql = " and ".join(where)
+    where_sql = " and ".join(where) if where else "1=1"
 
     date_basis = st.radio(
         "Date basis",
@@ -153,7 +144,7 @@ def render_billing_tab(engine, f, *, rel):
 
     bill_like = st.text_input("Filter bill_no contains", value="")
     if bill_like.strip() and ("bill_no" in cols):
-        where_bill = "and coalesce(\"bill_no\",'') ilike %(bill_like)s"
+        where_bill = 'and coalesce("bill_no", \'\') ilike :bill_like'
         params["bill_like"] = f"%{bill_like.strip()}%"
     else:
         where_bill = ""
@@ -164,6 +155,7 @@ def render_billing_tab(engine, f, *, rel):
     sel = []
     sel.append(_col_or_literal(cols, "date", "null::date"))
     sel.append(_col_or_literal(cols, "head_name", "''"))
+    sel.append(_col_or_literal(cols, "head_no", "''"))
     sel.append(_col_or_literal(cols, "subhead1", "''"))
     sel.append(_col_or_literal(cols, "account", "''"))
     sel.append(_col_or_literal(cols, "bill_no", "''"))
@@ -171,6 +163,12 @@ def render_billing_tab(engine, f, *, rel):
     sel.append(_col_or_literal(cols, "bank", "''"))
     sel.append(_col_or_literal(cols, "debit_payment", "0::numeric"))
     sel.append(_col_or_literal(cols, "credit_deposit", "0::numeric"))
+    if "description" in cols:
+        sel.append(_col_or_literal(cols, "description", "''"))
+    if "ref" in cols:
+        sel.append(_col_or_literal(cols, "ref", "''"))
+    if "pay_to" in cols:
+        sel.append(_col_or_literal(cols, "pay_to", "''"))
     if has_reconcile:
         sel.append(_col_or_literal(cols, "reconcile", "null::timestamp"))
 
@@ -182,9 +180,7 @@ def render_billing_tab(engine, f, *, rel):
         limit 5000
     """
 
-    # We already interpolated the relation name in the SQL; passing rel again
-    # can cause double-substitution in some run_df implementations.
-    df0 = run_df(engine, sql_sample, params, rel=None)
+    df0 = run_df(engine, sql_sample, params, rel=rel)
     if df0 is None or df0.empty:
         st.warning("No billing ledger rows found under current filters.")
         return
@@ -201,9 +197,7 @@ def render_billing_tab(engine, f, *, rel):
 
     df0["billing_stream"] = df0["head_name"].apply(_billing_stream_from_head)
     df0["is_grant"] = df0["subhead1"].str.contains("Government Grant", case=False, na=False)
-    df0["is_indirect_income"] = df0["subhead1"].str.contains(
-        r"Income \(Indirect/Opr", case=False, na=False
-    )
+    df0["is_indirect_income"] = df0["subhead1"].str.contains(r"Income \(Indirect/Opr", case=False, na=False)
 
     df0["date"] = pd.to_datetime(df0["date"], errors="coerce")
     if has_reconcile and ("reconcile" in df0.columns):
@@ -231,9 +225,7 @@ def render_billing_tab(engine, f, *, rel):
     st.markdown("## 🏷 Income classification (Grants vs Ordinary)")
 
     receipts_total = float(df0.loc[df0["credit_deposit"] > 0, "credit_deposit"].sum())
-    grant_receipts = float(
-        df0.loc[(df0["credit_deposit"] > 0) & (df0["is_grant"]), "credit_deposit"].sum()
-    )
+    grant_receipts = float(df0.loc[(df0["credit_deposit"] > 0) & (df0["is_grant"]), "credit_deposit"].sum())
     grant_ratio = (grant_receipts / receipts_total * 100.0) if receipts_total else 0.0
 
     c1, c2, c3 = st.columns(3)
@@ -272,9 +264,7 @@ def render_billing_tab(engine, f, *, rel):
 
     par_mask = df_led["billing_stream"].isin(PAR_STREAMS)
     df_led.loc[par_mask, "bill_key_routed"] = (
-        df_led.loc[par_mask, "account"].str.strip()
-        + " | "
-        + df_led.loc[par_mask, "subhead1"].str.strip()
+        df_led.loc[par_mask, "account"].str.strip() + " | " + df_led.loc[par_mask, "subhead1"].str.strip()
     )
 
     agg = df_led.groupby(["bill_key_routed"], as_index=False).agg(
@@ -299,6 +289,77 @@ def render_billing_tab(engine, f, *, rel):
 
     show_df(agg.sort_values("outstanding", ascending=False).head(200))
 
+    # --------------------------
+    # ✅ DRILL-DOWN (NEW)
+    # --------------------------
+    st.divider()
+    st.markdown("## 🔎 Drill-down: open a bill / ledger")
+
+    if not agg.empty:
+        selected_key = st.selectbox(
+            "Drill into bill / ledger",
+            options=agg["bill_key_routed"].astype(str).tolist(),
+            index=0,
+        )
+
+        if selected_key:
+            key = selected_key.strip()
+
+            drill_where_sql = where_sql
+            drill_params = dict(params)
+
+            # If routed key is account | subhead1
+            if " | " in key:
+                acct, subh = [x.strip() for x in key.split(" | ", 1)]
+
+                if "account" in cols:
+                    drill_where_sql += ' and "account" = :acct'
+                    drill_params["acct"] = acct
+                if "subhead1" in cols:
+                    drill_where_sql += ' and "subhead1" = :subh'
+                    drill_params["subh"] = subh
+
+            else:
+                # Otherwise drill by bill_no
+                if "bill_no" in cols:
+                    drill_where_sql += ' and "bill_no" = :bill_no'
+                    drill_params["bill_no"] = key
+                else:
+                    st.warning("Cannot drill by bill_no because column 'bill_no' is not present in this relation.")
+                    drill_where_sql = None
+
+            if drill_where_sql:
+                detail_sel = []
+                detail_sel.append(_col_or_literal(cols, "date", "null::date"))
+                if has_reconcile:
+                    detail_sel.append(_col_or_literal(cols, "reconcile", "null::timestamp"))
+                detail_sel.append(_col_or_literal(cols, "bank", "''"))
+                detail_sel.append(_col_or_literal(cols, "head_name", "''"))
+                detail_sel.append(_col_or_literal(cols, "head_no", "''"))
+                detail_sel.append(_col_or_literal(cols, "subhead1", "''"))
+                detail_sel.append(_col_or_literal(cols, "account", "''"))
+                detail_sel.append(_col_or_literal(cols, "bill_no", "''"))
+                detail_sel.append(_col_or_literal(cols, "folio_chq_no", "''"))
+                if "ref" in cols:
+                    detail_sel.append(_col_or_literal(cols, "ref", "''"))
+                if "pay_to" in cols:
+                    detail_sel.append(_col_or_literal(cols, "pay_to", "''"))
+                if "description" in cols:
+                    detail_sel.append(_col_or_literal(cols, "description", "''"))
+                detail_sel.append(_col_or_literal(cols, "debit_payment", "0::numeric"))
+                detail_sel.append(_col_or_literal(cols, "credit_deposit", "0::numeric"))
+
+                sql_drill = f"""
+                    select {", ".join(detail_sel)}
+                    from {rel}
+                    where {drill_where_sql}
+                    order by "date" desc nulls last
+                    limit 5000
+                """
+                df_drill = run_df(engine, sql_drill, drill_params, rel=rel)
+                show_df(df_drill)
+
+    # Aging bucket totals
     st.markdown("### Aging bucket totals (outstanding)")
     buckets = (
         agg.groupby("aging_bucket", as_index=False)
