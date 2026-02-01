@@ -13,7 +13,7 @@ def render_revenue_tab(engine, f):
     rel_rev = pick_view(engine, REL_REV, rel_sem)
 
     where, params, _ = build_where_from_ui(
-        f["df"], f["dt"], f["bank"], f["head"], f["account"], f["attribute"], f["func_code"],
+        f["df"], f["dt"], f["bank"], f["head"], f["account"], f["head_no"], f["attribute"], f["func_code"],
         fy_label=f["fy_label"],
         func_override="Revenue",
     )
