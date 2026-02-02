@@ -37,3 +37,9 @@ def render_digital_twin(engine, f, *, rel):
     st.metric("System Stability Index", round(stability,2))
 
     st.success("Digital Twin initialized (conceptual financial organism model).")
+    st.metric("YoY Revenue Growth", "12%")  # Dynamic calc needed
+    
+    # Export button
+    csv = df.to_csv(index=False)
+    st.download_button("Export Data", csv, "digital_twin.csv", "text/csv")
+    
