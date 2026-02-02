@@ -23,6 +23,14 @@ def show_df(df: pd.DataFrame, *, label_col: str | None = None, total_label: str 
         out = pd.concat([out, pd.DataFrame([total_row])], ignore_index=True)
     st.dataframe(out, use_container_width=True)
 
+
+    if len(df) > max_rows:
+        st.warning(f"Showing first {max_rows} rows. Download full data below.")
+        df = df.head(max_rows)
+    # ... existing rendering ...
+    st.download_button("Export Excel", df.to_excel(), "data.xlsx")
+
+
 def drill_panel(engine, rel, base_where, base_params, *, title, drill_col, drill_value):
     st.markdown(f"### 🔎 Drill-down: {title}")
     where = base_where + [f'"{drill_col}" = :drill_value']
