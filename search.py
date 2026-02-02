@@ -28,7 +28,7 @@ def render_search_tab(engine, f, *, rel: str):
 
     # Global filters apply (same behavior as other tabs)
     where, params, _ = build_where_from_ui(
-        f["df"], f["dt"], f["bank"], f["head"], f["account"], f["attribute"], f["func_code"],
+        f["df"], f["dt"], f["bank"], f["head_no"], f["head"], f["account"], f["attribute"], f["func_code"],
         fy_label=f.get("fy_label", "ALL"),
         func_override=None,
     )
