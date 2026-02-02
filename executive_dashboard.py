@@ -3,10 +3,9 @@ import streamlit as st
 
 def render_executive_dashboard(engine, f, *, rel):
     st.subheader("Executive Dashboard")
-    sql = """
-        SELECT 
-            SUM(credit_deposit) AS total_revenue,
-            SUM(net_flow) AS total_expense,
-            SUM(CASE WHEN bill_no = 'Recoup' THEN (debit_payment - credit_deposit) ELSE 0 END) AS total_recoup
-        FROM v_finance_semantic
-        WHERE "date" BETWEEN :df AND
+    st.metric("Total Revenue", _money(df_rev["revenue"].sum()))
+    st.metric("Total Expense", _money(df_exp["expense"].sum()))
+    st.metric("Net Profit", _money(df_rev["revenue"].sum() - df_exp["expense"].sum()))
+    
+    # Trend charts (mock data for demo)
+    st.line_chart(pd.DataFrame({"Month": ["Jan", "Feb", "Mar"], "Revenue": [100, 150, 200]}))
