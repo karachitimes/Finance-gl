@@ -17,7 +17,7 @@ def render_classification_tab(engine, f, *, rel: str):
 
     # Filters
     where, params, _ = build_where_from_ui(
-        f["df"], f["dt"], f["bank"], f["head"], f["account"], f["attribute"], f["func_code"],
+        f["df"], f["dt"], f["bank"], f["head"],f["head_no"], f["account"], f["attribute"], f["func_code"],
         fy_label=f["fy_label"], func_override=None
     )
     where_sql = " and ".join(where) if where else "1=1"
@@ -97,3 +97,10 @@ def render_classification_tab(engine, f, *, rel: str):
 
     csv = df_out.to_csv(index=False).encode("utf-8")
     st.download_button("Download suggestions (CSV)", data=csv, file_name="head_mapping_suggestions.csv", mime="text/csv")
+
+
+
+    min_confidence = st.slider("Min Confidence", 0.5, 0.99, 0.8)
+    # ... existing logic ...
+    if st.button("Apply Suggestions"):
+        apply_suggestions(df_out)  # Batch update function
