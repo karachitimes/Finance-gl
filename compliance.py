@@ -178,3 +178,8 @@ def render_compliance_tab(engine, f, *, rel: str):
     """
     df = run_df(engine, sql, params, rel=rele)
     show_df(df)
+
+    if check == "Expense without Head":
+        st.warning("Critical Issue: 15 expenses missing heads!")
+        st.button("Auto-Assign to Default Head", on_click=auto_assign_head)
+        
