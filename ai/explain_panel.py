@@ -1,4 +1,3 @@
-
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -18,24 +17,51 @@ def _month_bounds(ts: pd.Timestamp):
 
 
 def _breakdown(engine, rel, f, *, dim: str, start: date, end: date, limit: int = 15):
+    """
+    Safe breakdown query:
+    - Whitelists allowed dimensions (prevents SQL errors/injection)
+    - Quotes identifiers for Postgres/view compatibility
+    - Guards LIMIT
+    - Uses bound params for dates
+    """
+
+    # 🔐 Only allow known-safe dimensions → actual SQL identifiers
+    DIM_MAP = {
+        "head_name": '"head_name"',
+        "pay_to": '"pay_to"',
+        "bank": '"bank"',
+    }
+
+    dim_sql = DIM_MAP.get(dim)
+    if not dim_sql:
+        raise ValueError(f"Unsupported dimension: {dim}")
+
     where_sql = f.get("where_sql", "1=1")
     params = dict(f.get("params", {}))
     params.update({"mstart": start, "mend": end})
 
+    # Guard limit (avoid weird values)
+    try:
+        limit_i = int(limit)
+    except Exception:
+        limit_i = 15
+    limit_i = max(1, min(limit_i, 100))
+
     sql = f"""
         select
-          coalesce(nullif(trim({dim}),''),'(blank)') as key,
+          coalesce(nullif(trim({dim_sql}),''),'(blank)') as key,
           coalesce(sum(coalesce(net_flow,0)),0) as amount
         from {rel}
         where {where_sql}
           and "date" >= %(mstart)s and "date" < %(mend)s
         group by 1
         order by 2 desc
-        limit {int(limit)}
+        limit {limit_i}
     """
+
     df = run_df(engine, sql, params, rel=rel)
     if df is None or df.empty:
-        return pd.DataFrame(columns=["key","amount"])
+        return pd.DataFrame(columns=["key", "amount"])
     df["amount"] = pd.to_numeric(df["amount"], errors="coerce").fillna(0.0)
     return df
 
@@ -58,18 +84,20 @@ def _lift(df_month: pd.DataFrame, df_base: pd.DataFrame):
         lift_pct = ((mv - bv) / bv * 100.0) if bv else (100.0 if mv else 0.0)
         share_lift_pp = (m_share - b_share) * 100.0
 
-        out.append({
-            "key": k,
-            "month_amount": mv,
-            "baseline_amount": bv,
-            "lift_%": lift_pct,
-            "share_lift_pp": share_lift_pp,
-        })
+        out.append(
+            {
+                "key": k,
+                "month_amount": mv,
+                "baseline_amount": bv,
+                "lift_%": lift_pct,
+                "share_lift_pp": share_lift_pp,
+            }
+        )
 
     df = pd.DataFrame(out)
     if df.empty:
         return df
-    return df.sort_values(["share_lift_pp","lift_%"], ascending=False)
+    return df.sort_values(["share_lift_pp", "lift_%"], ascending=False)
 
 
 def _severity(df_monthly: pd.DataFrame, month: pd.Timestamp, value_col: str):
@@ -137,7 +165,10 @@ def render_explain_panel(engine, f, *, rel, df_anom: pd.DataFrame):
     lift_top["lift_%"] = lift_top["lift_%"].round(1)
     lift_top["share_lift_pp"] = lift_top["share_lift_pp"].round(2)
 
-    st.dataframe(lift_top[["key","month_amount","baseline_amount","lift_%","share_lift_pp"]], use_container_width=True)
+    st.dataframe(
+        lift_top[["key", "month_amount", "baseline_amount", "lift_%", "share_lift_pp"]],
+        use_container_width=True,
+    )
 
     top = lift_top.iloc[0]["key"]
     top2 = lift_top.iloc[1]["key"] if len(lift_top) > 1 else "(n/a)"
