@@ -151,7 +151,17 @@ def render_intelligence_cockpit(engine, f, *, rel):
     st.divider()
 
     # Phase 4/5: drilldown + narrative
-    render_explain_panel(engine, f, rel=rel, df_anom=df_anom)
+    try:
+
+        render_explain_panel(engine, f, rel=rel, df_anom=df_anom)
+
+    except Exception as e:
+
+        st.error("Explain panel failed (breakdown query). The cockpit still works, but drilldown needs a SQL fix.")
+
+        st.exception(e)
+
+        return
 
     worst = df_anom.sort_values("severity_z", ascending=False).iloc[0]
     worst_month = worst["month"].strftime("%Y-%m")
